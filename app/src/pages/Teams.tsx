@@ -16,6 +16,8 @@ import {
     Input,
     InputNumber,
     message,
+    Select,
+    Tag,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { HolderOutlined } from "@ant-design/icons";
@@ -51,10 +53,14 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 
+/** ✅ status 타입 (Team 모델에 이미 정의돼 있으면 import해서 써도 됨) */
+type TeamStatus = "waiting" | "ready" | "working" | "paused" | "completed";
+
 type TeamFormValues = {
     id: number;
     name: string;
     password: string;
+    status: TeamStatus; // ✅ 추가
 };
 
 const TEAMS_COL = "teams";
@@ -125,6 +131,23 @@ function SortableRow(
     );
 }
 
+/** ✅ status 표시용 매핑 */
+const STATUS_LABEL: Record<TeamStatus, string> = {
+    waiting: "대기",
+    ready: "준비",
+    working: "진행",
+    paused: "중지",
+    completed: "완료",
+};
+
+const STATUS_COLOR: Record<TeamStatus, string> = {
+    waiting: "default",
+    ready: "blue",
+    working: "green",
+    paused: "orange",
+    completed: "purple",
+};
+
 export default function Teams() {
     const [teams, setTeams] = useState<Team[]>([]);
     const teamsRef = useRef<Team[]>([]);
@@ -143,7 +166,15 @@ export default function Teams() {
         const unsub = onSnapshot(
             q,
             (snap) => {
-                const data = snap.docs.map((d) => d.data() as Team);
+                // ✅ 기존 문서에 status가 없을 수도 있으니 기본값 보정
+                const data = snap.docs.map((d) => {
+                    const raw = d.data() as Team;
+                    return {
+                        ...raw,
+                        status: (raw.status ?? "waiting") as TeamStatus,
+                    };
+                });
+
                 setTeams(data);
                 teamsRef.current = data; // ✅ 최신값 보관
                 setLoading(false);
@@ -178,9 +209,28 @@ export default function Teams() {
                 align: "center",
                 render: () => <DragHandle />,
             },
-            { title: "공격 순서", dataIndex: "order", width: 120, render: (v?: number) => (v ? `${v}번` : "-"), },
-            { title: "팀", dataIndex: "id", width: 150, render: (v?: number) => (v ? `${v}팀` : "-") },
+            {
+                title: "공격 순서",
+                dataIndex: "order",
+                width: 120,
+                render: (v?: number) => (v ? `${v}번` : "-"),
+            },
+            {
+                title: "팀",
+                dataIndex: "id",
+                width: 120,
+                render: (v?: number) => (v ? `${v}팀` : "-"),
+            },
             { title: "팀 이름", dataIndex: "name", width: 150 },
+            {
+                title: "상태",
+                dataIndex: "status",
+                width: 120,
+                render: (s?: TeamStatus) => {
+                    const st = (s ?? "waiting") as TeamStatus;
+                    return <Tag color={STATUS_COLOR[st]}>{STATUS_LABEL[st]}</Tag>;
+                },
+            },
             {
                 title: "비밀번호",
                 dataIndex: "password",
@@ -211,6 +261,8 @@ export default function Teams() {
     const onCreate = () => {
         setEditing(null);
         form.resetFields();
+        // ✅ 기본 status 설정
+        form.setFieldsValue({ status: "waiting" });
         setOpen(true);
     };
 
@@ -221,6 +273,7 @@ export default function Teams() {
             id: team.id,
             name: team.name,
             password: team.password,
+            status: ((team.status ?? "waiting") as TeamStatus),
         });
         setOpen(true);
     };
@@ -234,7 +287,10 @@ export default function Teams() {
         const snap = await getDoc(teamRef);
         if (snap.exists()) throw new Error("DUPLICATE_ID");
 
-        const maxOrder = currentTeams.reduce((max, t) => Math.max(max, t.order ?? 0), 0);
+        const maxOrder = currentTeams.reduce(
+            (max, t) => Math.max(max, t.order ?? 0),
+            0
+        );
         const nextOrder = maxOrder + 1;
 
         const newTeam: Team = {
@@ -242,22 +298,19 @@ export default function Teams() {
             name: values.name,
             password: values.password,
             order: nextOrder,
+            status: values.status ?? "waiting", // ✅ 추가
         };
 
         await setDoc(teamRef, newTeam);
-
-        // ✅ “항상 연속(order=1..N)”을 강제하려면 아래를 켜도 됨(팀<=10이면 부담X)
-        // const after = [...currentTeams, newTeam].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
-        // const normalized = after.map((t, idx) => ({ ...t, order: idx + 1 }));
-        // await persistOrderAsOneToN(normalized);
     };
 
-    /** ✅ 팀 수정: name/password만 업데이트 (id/order 유지) */
+    /** ✅ 팀 수정: name/password/status만 업데이트 (id/order 유지) */
     const updateTeam = async (teamId: number, values: TeamFormValues) => {
         const ref = doc(db, TEAMS_COL, String(teamId));
         await updateDoc(ref, {
             name: values.name,
             password: values.password,
+            status: values.status, // ✅ 추가
         });
     };
 
@@ -294,7 +347,6 @@ export default function Teams() {
                     await batch.commit();
 
                     message.success("삭제되었습니다.");
-                    // ✅ setTeams를 여기서 굳이 건드리지 않음: onSnapshot이 바로 갱신해줌 (깜빡임 최소)
                 } catch (e) {
                     console.error(e);
                     message.error("삭제 실패");
@@ -422,13 +474,21 @@ export default function Teams() {
                 cancelText="취소"
                 destroyOnClose
             >
-                <Form<TeamFormValues> form={form} layout="vertical">
+                <Form<TeamFormValues>
+                    form={form}
+                    layout="vertical"
+                    initialValues={{ status: "waiting" }} // ✅ 기본값
+                >
                     <Form.Item
                         label="팀 (숫자)"
                         name="id"
                         rules={[{ required: true, message: "ID를 입력하세요." }]}
                     >
-                        <InputNumber min={1} style={{ width: "100%" }} disabled={!!editing} />
+                        <InputNumber
+                            min={1}
+                            style={{ width: "100%" }}
+                            disabled={!!editing}
+                        />
                     </Form.Item>
 
                     <Form.Item
@@ -447,11 +507,32 @@ export default function Teams() {
                         <Input.Password />
                     </Form.Item>
 
+                    {/* ✅ status 추가 */}
+                    <Form.Item
+                        label="상태"
+                        name="status"
+                        rules={[{ required: true, message: "상태를 선택하세요." }]}
+                    >
+                        <Select
+                            options={[
+                                { value: "waiting", label: "대기 (waiting)" },
+                                { value: "ready", label: "준비 (ready)" },
+                                { value: "working", label: "진행 (working)" },
+                                { value: "paused", label: "중지 (paused)" },
+                                { value: "completed", label: "완료 (completed)" },
+                            ]}
+                        />
+                    </Form.Item>
+
                     <Form.Item label="공격 순서">
-                        <Input value={editing?.order ?? "자동(추가 시 마지막 순서)"} disabled />
+                        <Input
+                            value={editing?.order ?? "자동(추가 시 마지막 순서)"}
+                            disabled
+                        />
                     </Form.Item>
                 </Form>
             </Modal>
         </Card>
     );
 }
+``

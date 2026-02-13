@@ -4,6 +4,7 @@ export interface Team {
     name: string;
     password: string;
     order: number;
+    status: string;
 }
 
 
