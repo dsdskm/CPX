@@ -2,26 +2,24 @@ package com.aba.cpx
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
 import com.aba.cpx.data.model.Team
-import com.aba.cpx.ui.screens.IntroScreen
-import com.aba.cpx.ui.screens.LoginScreen
-import com.aba.cpx.ui.screens.PowerPlacementScreen
+import com.aba.cpx.ui.common.ScreenContainer
+import com.aba.cpx.ui.screens.*
 import com.aba.cpx.ui.theme.CPXTheme
 
-// 현재 표시할 화면을 정의하는 Enum
 enum class Screen {
     Intro,
     Login,
-    PowerPlacement
+    PowerPlacement,
+    Waiting,
+    MyBoardView,      // ✅ 추가 (내 전력배치 보기)
+    Attack,           // ✅ 추가 (3칸 공격)
+    ManagerDashboard,
+    PlacementView
 }
 
 class MainActivity : ComponentActivity() {
@@ -30,7 +28,9 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             CPXTheme {
-                AppNavigator()
+                ScreenContainer {
+                    AppNavigator()
+                }
             }
         }
     }
@@ -38,56 +38,165 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun AppNavigator() {
-    var currentScreen by remember { mutableStateOf(Screen.Intro) }
+    val backStack = remember { mutableStateListOf(Screen.Intro) }
+    val currentScreen = backStack.last()
 
-    // ✅ 로그인 후 Team 전체를 들고가야 status를 보여줄 수 있음
     var loggedInTeam by remember { mutableStateOf<Team?>(null) }
+    var isManager by remember { mutableStateOf(false) }
+
+    // manager placement view target
+    var viewTeamId by remember { mutableStateOf(0) }
+    var viewTeamName by remember { mutableStateOf("") }
+    var viewTeamScore by remember { mutableStateOf<Int?>(null) }   // ✅ 추가
+    val gameId = "default_game" // ✅ 고정 사용
+
+    fun navigate(to: Screen, clearBackStack: Boolean = false) {
+        if (clearBackStack) {
+            backStack.clear()
+            backStack.add(to)
+            return
+        }
+        if (backStack.lastOrNull() != to) backStack.add(to)
+    }
+
+    fun popBack(): Boolean {
+        return if (backStack.size > 1) {
+            backStack.removeAt(backStack.lastIndex) // ✅ removeLast() 대신
+            true
+        } else false
+    }
+
+    // ✅ 팀 화면에서 뒤로가기 정책:
+    // - Waiting: 완전 차단
+    // - Attack/MyBoardView: 원하면 차단 가능 (여기선 "차단 안 함"으로 두되 자동 전환이 주 흐름)
+    val backBlockedScreens = setOf(Screen.Waiting)
+    val backEnabled = backStack.size > 1 && !backBlockedScreens.contains(currentScreen)
+
+    BackHandler(enabled = backEnabled) { popBack() }
+
+    // ✅ Waiting에서 back 눌러도 먹기
+    if (currentScreen == Screen.Waiting) {
+        BackHandler(enabled = true) { /* do nothing */ }
+    }
 
     when (currentScreen) {
         Screen.Intro -> {
-            IntroScreen(onStartClick = { currentScreen = Screen.Login })
+            IntroScreen(onStartClick = { navigate(Screen.Login) })
         }
 
         Screen.Login -> {
-            // ✅ LoginScreen이 team "String"이 아니라 Team을 넘겨야 함
-            //    (지금 PowerPlacementScreen이 team + status를 필요로 함)
             LoginScreen(
-                onLoginSuccess = { teamName ->
-                    // ⚠️ 현재 LoginScreen은 teamName(String)만 넘기고 있어서
-                    //    여기서 status를 만들 수가 없음.
-                    //    해결: LoginScreen의 onLoginSuccess 시그니처를 (Team) -> Unit 으로 바꾸는 걸 권장.
-                    //    일단 임시로 status는 "waiting"으로 고정.
-                    loggedInTeam = Team(
-                        id = -1,
-                        name = teamName,
-                        order = 0,
-                        password = "",
-                        status = "waiting"
-                    )
-                    currentScreen = Screen.PowerPlacement
+                onLoginSuccess = { team, managerFlag ->
+                    loggedInTeam = team
+                    isManager = managerFlag
+
+                    val next = if (managerFlag) {
+                        Screen.ManagerDashboard
+                    } else {
+                        if (team.status.lowercase() == "waiting") Screen.PowerPlacement else Screen.Waiting
+                    }
+
+                    // ✅ 로그인 이후 Intro/Login으로 되돌아가지 않게 루트 교체
+                    navigate(next, clearBackStack = true)
                 }
             )
         }
 
         Screen.PowerPlacement -> {
             val team = loggedInTeam
-            PowerPlacementScreen(
-                team = team?.name ?: "Unknown",
-                status = team?.status ?: "waiting"
+            if (team == null) {
+                navigate(Screen.Login, clearBackStack = true)
+            } else {
+                PowerPlacementScreen(
+                    teamId = team.id,
+                    teamName = team.name,
+                    status = team.status,
+                    onMoveToWaiting = {
+                        // ✅ 로컬 상태도 ready로 반영
+                        loggedInTeam = team.copy(status = "ready")
+                        // ✅ Waiting은 루트로 두고 뒤로가기 차단
+                        navigate(Screen.Waiting, clearBackStack = true)
+                    }
+                )
+            }
+        }
+
+        Screen.Waiting -> {
+            val team = loggedInTeam
+            if (team == null) {
+                navigate(Screen.Login, clearBackStack = true)
+            } else {
+                WaitingScreen(
+                    teamId = team.id,
+                    teamName = team.name,
+                    gameId = gameId,
+                    onGoAttack = { navigate(Screen.Attack, clearBackStack = true) },
+                    onGoMyBoardView = { navigate(Screen.MyBoardView, clearBackStack = true) }
+                )
+            }
+        }
+
+        Screen.MyBoardView -> {
+            val team = loggedInTeam
+            if (team == null) {
+                navigate(Screen.Login, clearBackStack = true)
+            } else {
+                // ✅ 내 배치 보기(읽기) + 내 턴 되면 Attack으로 자동 이동
+                PowerPlacementViewerScreen(
+                    teamId = team.id,
+                    teamName = team.name,
+                    onBack = {
+                        // 정책: 팀 화면에선 보통 back 의미 없으니 Waiting으로 보내는게 안전
+                        navigate(Screen.Waiting, clearBackStack = true)
+                    },
+                    gameId = gameId,
+                    onGoAttack = {
+                        navigate(Screen.Attack, clearBackStack = true)
+                    }
+                )
+            }
+        }
+
+        Screen.Attack -> {
+            val team = loggedInTeam
+            if (team == null) {
+                navigate(Screen.Login, clearBackStack = true)
+            } else {
+                AttackScreen(
+                    teamId = team.id,
+                    teamName = team.name,
+                    gameId = gameId,
+                    onSubmitted = {
+                        // 제출 후에는 Waiting으로 보내면 -> 다시 자동 라우팅 됨
+                        navigate(Screen.Waiting, clearBackStack = true)
+                    },
+                    onNotMyTurn = {
+                        // 턴이 넘어가면 내 배치 보기로
+                        navigate(Screen.MyBoardView, clearBackStack = true)
+                    }
+                )
+            }
+        }
+
+        Screen.ManagerDashboard -> {
+            ManagerDashboardScreen(
+                gameId = gameId,
+                onViewPlacement = { tId, tName, score ->
+                    viewTeamId = tId
+                    viewTeamName = tName
+                    viewTeamScore = score
+                    navigate(Screen.PlacementView)
+                }
             )
         }
-    }
-}
 
-@Composable
-fun MainScreen(team: String) {
-    Box(
-        modifier = Modifier.fillMaxSize(),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            text = "환영합니다, $team!",
-            style = MaterialTheme.typography.headlineMedium
-        )
+        Screen.PlacementView -> {
+            PowerPlacementViewerScreen(
+                teamId = viewTeamId,
+                teamName = viewTeamName,
+                score = viewTeamScore,
+                onBack = { popBack() }
+            )
+        }
     }
 }

@@ -1,5 +1,6 @@
 package com.aba.cpx.ui.screens
 
+import android.annotation.SuppressLint
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -23,8 +25,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.times
+import com.aba.cpx.data.model.CellDto
+import com.aba.cpx.data.model.PlacementDto
+import com.aba.cpx.data.model.PowerPlacement
+import com.aba.cpx.data.repository.PowerPlacementRepository
+import com.aba.cpx.data.repository.TeamRepository
 import kotlinx.coroutines.launch
 
 private data class ColumnHeader(
@@ -46,10 +55,13 @@ private data class Placement(
     val cells: List<Pair<Int, Int>>
 )
 
+@SuppressLint("UnusedBoxWithConstraintsScope")
 @Composable
 fun PowerPlacementScreen(
-    team: String,
-    status: String
+    teamId: Int,
+    teamName: String,
+    status: String,
+    onMoveToWaiting: () -> Unit
 ) {
     val headers = listOf(
         ColumnHeader("사복부", "10점"),
@@ -78,10 +90,9 @@ fun PowerPlacementScreen(
     val navBarPadding = WindowInsets.navigationBars.asPaddingValues()
     val statusBarPadding = WindowInsets.statusBars.asPaddingValues()
 
-    // ✅ Toast 대신 Material3 Snackbar로 구현
+    // ✅ Snackbar
     val snackHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
-
     fun showToast(msg: String) {
         scope.launch {
             snackHostState.currentSnackbarData?.dismiss()
@@ -89,7 +100,7 @@ fun PowerPlacementScreen(
         }
     }
 
-    // ✅ status -> 한글 (대기 -> 대기중)
+    // ✅ status -> 한글
     val statusKo = remember(status) {
         when (status.lowercase()) {
             "waiting" -> "대기중"
@@ -101,7 +112,7 @@ fun PowerPlacementScreen(
         }
     }
 
-    // ✅ 점수 파싱: "10점" -> 10
+    // ✅ 점수 파싱
     val colPoints: List<Int> = remember(headers) {
         headers.map { h -> h.scoreText.filter { it.isDigit() }.toIntOrNull() ?: 0 }
     }
@@ -110,9 +121,9 @@ fun PowerPlacementScreen(
     val shapes = remember {
         listOf(
             ShapeDef(UnitType.TANK, "탱크", listOf(0 to 0, 1 to 0, 0 to 1, 1 to 1)),
-            ShapeDef(UnitType.CANNON1, "대포1", listOf(0 to -1, 0 to 0, 0 to 1)),      // 세로 3, 가운데 기준
-            ShapeDef(UnitType.CANNON2, "대포2", listOf(1 to -1, 0 to 0, 0 to 1)),      // xO / OX / OX
-            ShapeDef(UnitType.CANNON3, "대포3", listOf(1 to -1, 0 to 0, -1 to 1)),     // 대각 3
+            ShapeDef(UnitType.CANNON1, "대포1", listOf(0 to -1, 0 to 0, 0 to 1)),
+            ShapeDef(UnitType.CANNON2, "대포2", listOf(1 to -1, 0 to 0, 0 to 1)),
+            ShapeDef(UnitType.CANNON3, "대포3", listOf(1 to -1, 0 to 0, -1 to 1)),
             ShapeDef(UnitType.INFANTRY, "보병", listOf(0 to 0)),
         )
     }
@@ -128,13 +139,18 @@ fun PowerPlacementScreen(
     var remainCannonTotal by remember { mutableStateOf(maxCannonTotal) }
     var remainInfantry by remember { mutableStateOf(maxInfantry) }
 
-    // ✅ "준비 완료" 확정 상태 (true면 더 이상 재배치 불가)
-    var isLocked by remember { mutableStateOf(false) }
+    // ✅ 팀 status가 ready면 잠금
+    var isLocked by remember { mutableStateOf(status.lowercase() == "ready") }
 
-    // ✅ 준비 완료 컨펌 다이얼로그 표시
+    // ✅ 준비 완료 컨펌
     var showConfirmDialog by remember { mutableStateOf(false) }
 
-    // 배치 단위 저장
+    // ✅ 복원/저장 진행 상태
+    var isRestoring by remember { mutableStateOf(true) }
+    var restoreError by remember { mutableStateOf<String?>(null) }
+    var isSubmitting by remember { mutableStateOf(false) }
+
+    // 배치 저장
     var placements by remember { mutableStateOf<List<Placement>>(emptyList()) }
     var nextPlacementId by remember { mutableStateOf(1) }
 
@@ -145,10 +161,10 @@ fun PowerPlacementScreen(
         }
     }
 
-    // ✅ "진짜" 색상
-    val tankColor = Color(0xFFFF2D2D)         // 빨간색
-    val cannonColor = Color(0xFF6EC8FF)       // 하늘색
-    val infantryColor = Color(0xFF222222)     // 아주 어두운 회색
+    // ✅ 색상
+    val tankColor = Color(0xFFFF2D2D)
+    val cannonColor = Color(0xFF6EC8FF)
+    val infantryColor = Color(0xFF222222)
 
     fun unitColor(type: UnitType): Color = when (type) {
         UnitType.TANK -> tankColor
@@ -193,16 +209,14 @@ fun PowerPlacementScreen(
             showToast("준비 완료 이후에는 전력을 재배치할 수 없습니다.")
             return
         }
+        if (isRestoring || isSubmitting) return
 
-        // 1) 남은 개수 없음 -> 토스트
         if (!canPlaceNow(selected)) {
             showToast(allPlacedMessage(selected.type))
             return
         }
 
         val targetCells = selected.blocks.map { (dx, dy) -> (anchorCol + dx) to (anchorRow + dy) }
-
-        // 2) 배치 불가(경계/겹침) -> 토스트
         val outOfBounds = targetCells.any { (c, r) -> !isInsideGrid(c, r) }
         val overlapped = targetCells.any { cellToPlacement.containsKey(it) }
 
@@ -211,7 +225,6 @@ fun PowerPlacementScreen(
             return
         }
 
-        // 3) 배치 성공
         val newPlacement = Placement(
             id = nextPlacementId,
             type = selected.type,
@@ -227,6 +240,8 @@ fun PowerPlacementScreen(
             showToast("준비 완료 이후에는 전력을 재배치할 수 없습니다.")
             return
         }
+        if (isRestoring || isSubmitting) return
+
         placements = placements.filterNot { it.id == p.id }
         inc(p.type)
     }
@@ -236,12 +251,11 @@ fun PowerPlacementScreen(
     val placedCannon = maxCannonTotal - remainCannonTotal
     val placedInfantry = maxInfantry - remainInfantry
 
-    // ✅ 준비 완료 버튼 활성 조건: 모든 병력 배치 완료
+    // ✅ 준비 완료 버튼 활성 조건
     val isAllPlaced = remainTank == 0 && remainCannonTotal == 0 && remainInfantry == 0
 
     // 점수 계산
     val filledCells = remember(placements) { placements.flatMap { it.cells } }
-
     val colFilledCount: List<Int> = remember(filledCells) {
         val counts = IntArray(colsCount)
         filledCells.forEach { (c, r) ->
@@ -249,14 +263,72 @@ fun PowerPlacementScreen(
         }
         counts.toList()
     }
-
     val colScoreSum: List<Int> = remember(colFilledCount, colPoints) {
         List(colsCount) { c -> colFilledCount[c] * colPoints[c] }
     }
-
     val totalScore: Int = remember(colScoreSum) { colScoreSum.sum() }
 
-    // ✅ SnackBar Host (토스트 역할) + 우측하단 "준비 완료" 버튼을 겹쳐 배치
+    // ✅ Firestore 저장용 변환
+    fun toPlacementDtos(list: List<Placement>): List<PlacementDto> =
+        list.map { p ->
+            PlacementDto(
+                id = p.id,
+                type = p.type.name,
+                cells = p.cells.map { (c, r) -> CellDto(c = c, r = r) }
+            )
+        }
+
+    // ✅ Firestore 로드용 변환
+    fun dtoToUnitType(type: String): UnitType? =
+        runCatching { UnitType.valueOf(type) }.getOrNull()
+
+    fun fromPlacementDtos(dtos: List<PlacementDto>): List<Placement> =
+        dtos.mapNotNull { dto ->
+            val ut = dtoToUnitType(dto.type) ?: return@mapNotNull null
+            val cells = dto.cells.map { it.c to it.r }
+            Placement(id = dto.id, type = ut, cells = cells)
+        }
+
+    fun recomputeRemaining(list: List<Placement>) {
+        val tanks = list.count { it.type == UnitType.TANK }
+        val infs = list.count { it.type == UnitType.INFANTRY }
+        val cannons = list.count {
+            it.type == UnitType.CANNON1 || it.type == UnitType.CANNON2 || it.type == UnitType.CANNON3
+        }
+
+        remainTank = (maxTank - tanks).coerceAtLeast(0)
+        remainInfantry = (maxInfantry - infs).coerceAtLeast(0)
+        remainCannonTotal = (maxCannonTotal - cannons).coerceAtLeast(0)
+    }
+
+    val repo = remember { PowerPlacementRepository() }
+    val teamRepo = remember { TeamRepository() }
+
+    // ✅ 화면 진입 시 배치 로드
+    LaunchedEffect(teamId) {
+        isLocked = status.lowercase() == "ready"
+        isRestoring = true
+        restoreError = null
+
+        repo.loadOnce(
+            teamId = teamId,
+            onSuccess = { doc ->
+                val restored = fromPlacementDtos(doc?.placements.orEmpty())
+                placements = restored
+                recomputeRemaining(restored)
+
+                val maxId = restored.maxOfOrNull { it.id } ?: 0
+                nextPlacementId = maxId + 1
+
+                isRestoring = false
+            },
+            onFail = { e ->
+                restoreError = e.message ?: "배치 정보를 불러오지 못했습니다."
+                isRestoring = false
+            }
+        )
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -273,175 +345,246 @@ fun PowerPlacementScreen(
                 ),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            // 최상단: 좌측 팀-상태 / 우측 버튼 그룹
+            // ✅ 상단 줄: 왼쪽(팀/상태) + 가운데(배치점수 합계) + 오른쪽(유닛 선택) + (준비 완료 버튼)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                // 왼쪽: 팀/상태
                 Text(
-                    text = "$team - $statusKo",
+                    text = "$teamName - $statusKo",
                     style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.weight(1f),
-                    textAlign = TextAlign.Start
+                    textAlign = TextAlign.Start,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
                 )
 
+                // 가운데: 점수
+                Box(
+                    modifier = Modifier.weight(1f),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "${totalScore}점",
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                // 오른쪽: 유닛선택 + 준비완료
                 Row(
-                    modifier = Modifier.horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.weight(1.4f),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    shapes.forEach { def ->
-                        val isSelected = def.type == selected.type
-                        val enabled = canPlaceNow(def) && !isLocked
+                    Row(
+                        modifier = Modifier
+                            .weight(1f)
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        shapes.forEach { def ->
+                            val isSelected = def.type == selected.type
+                            val enabled = canPlaceNow(def) && !isLocked && !isRestoring && !isSubmitting
 
-                        val countText = when (def.type) {
-                            UnitType.TANK -> "${placedTank}/${maxTank}"
-                            UnitType.INFANTRY -> "${placedInfantry}/${maxInfantry}"
-                            UnitType.CANNON1, UnitType.CANNON2, UnitType.CANNON3 -> "${placedCannon}/${maxCannonTotal}"
-                        }
-
-                        UnitSelectButton(
-                            label = def.label,
-                            countText = countText,
-                            isSelected = isSelected,
-                            enabled = enabled,
-                            color = unitColor(def.type),
-                            blocks = def.blocks,
-                            onClick = {
-                                if (isLocked) {
-                                    showToast("준비 완료 이후에는 전력을 재배치할 수 없습니다.")
-                                } else {
-                                    selected = def
-                                }
+                            val countText = when (def.type) {
+                                UnitType.TANK -> "${placedTank}/${maxTank}"
+                                UnitType.INFANTRY -> "${placedInfantry}/${maxInfantry}"
+                                UnitType.CANNON1, UnitType.CANNON2, UnitType.CANNON3 ->
+                                    "${placedCannon}/${maxCannonTotal}"
                             }
-                        )
+
+                            UnitSelectButton(
+                                label = def.label,
+                                countText = countText,
+                                isSelected = isSelected,
+                                enabled = enabled,
+                                color = unitColor(def.type),
+                                blocks = def.blocks,
+                                onClick = {
+                                    if (isLocked) showToast("준비 완료 이후에는 전력을 재배치할 수 없습니다.")
+                                    else selected = def
+                                }
+                            )
+                        }
+                    }
+
+                    Spacer(Modifier.width(8.dp))
+
+                    Button(
+                        onClick = { showConfirmDialog = true },
+                        enabled = isAllPlaced && !isLocked && !isRestoring && !isSubmitting
+                    ) {
+                        Text(if (isSubmitting) "저장중..." else "준비 완료")
                     }
                 }
             }
 
-            // 표 (가운데 정렬)
+            // ✅ 로딩/에러 표시
+            if (isRestoring) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    CircularProgressIndicator()
+                    Spacer(Modifier.width(10.dp))
+                    Text("배치 불러오는 중...")
+                }
+            }
+            if (!isRestoring && restoreError != null) {
+                Text(
+                    text = restoreError!!,
+                    color = Color.Red,
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = TextAlign.Center
+                )
+            }
+
+            // ✅ 그리드를 "남는 높이"만큼 최대한 채우도록 동적 셀 사이즈 계산
             Box(
                 modifier = Modifier
                     .weight(1f)
-                    .fillMaxWidth(),
-                contentAlignment = Alignment.Center
+                    .fillMaxWidth()
             ) {
-                Box(
+                BoxWithConstraints(
                     modifier = Modifier
-                        .wrapContentSize()
+                        .fillMaxSize()
                         .background(Color.White)
                         .border(1.dp, Color(0xFF999999))
-                        .horizontalScroll(hScroll)
-                        .verticalScroll(vScroll)
                         .padding(8.dp)
                 ) {
-                    Column {
-                        // 헤더 Row
-                        Row {
-                            TableCell("", 92.dp, 56.dp, true, background = null, onClick = null)
-                            headers.forEach {
-                                TableCell(
-                                    "${it.title}\n${it.scoreText}",
-                                    88.dp,
-                                    56.dp,
-                                    true,
-                                    background = null,
-                                    onClick = null
-                                )
-                            }
-                        }
+                    val gridW = maxWidth
+                    val gridH = maxHeight
 
-                        // 그리드
-                        rows.forEachIndexed { rowIdx, rowName ->
+                    // 왼쪽 라벨 컬럼 폭
+                    val leftColW = (gridW * 0.18f).coerceIn(76.dp, 110.dp)
+                    val cellW = ((gridW - leftColW) / colsCount).coerceIn(62.dp, 110.dp)
+
+                    // 헤더/푸터/본문 높이
+                    val headerH = (gridH * 0.12f).coerceIn(44.dp, 64.dp)
+                    val footerH = (gridH * 0.10f).coerceIn(40.dp, 56.dp)
+                    val bodyH = (gridH - headerH - footerH).coerceAtLeast(0.dp)
+                    val rowH = (bodyH / rowsCount).coerceIn(34.dp, 72.dp)
+
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .horizontalScroll(hScroll)
+                            .verticalScroll(vScroll)
+                    ) {
+                        Column {
                             Row {
-                                TableCell(rowName, 92.dp, 44.dp, true, background = null, onClick = null)
-
-                                headers.forEachIndexed { colIdx, _ ->
-                                    val placement = cellToPlacement[colIdx to rowIdx]
-                                    val bg = placement?.let { unitColor(it.type) } ?: Color.White
-
+                                TableCell("", leftColW, headerH, true, background = null, onClick = null)
+                                headers.forEach {
                                     TableCell(
-                                        text = "",
-                                        width = 88.dp,
-                                        height = 44.dp,
-                                        isHeader = false,
-                                        background = bg,
-                                        onClick = {
-                                            val p = cellToPlacement[colIdx to rowIdx]
-                                            if (p != null) removePlacement(p) else tryPlace(colIdx, rowIdx)
-                                        }
+                                        "${it.title}\n${it.scoreText}",
+                                        cellW,
+                                        headerH,
+                                        true,
+                                        background = null,
+                                        onClick = null
+                                    )
+                                }
+                            }
+
+                            rows.forEachIndexed { rowIdx, rowName ->
+                                Row {
+                                    TableCell(rowName, leftColW, rowH, true, background = null, onClick = null)
+
+                                    for (colIdx in 0 until colsCount) {
+                                        val placement = cellToPlacement[colIdx to rowIdx]
+                                        val bg = placement?.let { unitColor(it.type) } ?: Color.White
+
+                                        TableCell(
+                                            text = "",
+                                            width = cellW,
+                                            height = rowH,
+                                            isHeader = false,
+                                            background = bg,
+                                            onClick = {
+                                                val p = cellToPlacement[colIdx to rowIdx]
+                                                if (p != null) removePlacement(p) else tryPlace(colIdx, rowIdx)
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+
+                            Row {
+                                TableCell("세로라인\n배치점수", leftColW, footerH, true, background = null, onClick = null)
+                                headers.forEachIndexed { colIdx, _ ->
+                                    TableCell(
+                                        "${colScoreSum[colIdx]}점",
+                                        cellW,
+                                        footerH,
+                                        false,
+                                        background = null,
+                                        onClick = null
                                     )
                                 }
                             }
                         }
-
-                        // 세로라인 배치점수 Row
-                        Row {
-                            TableCell("세로라인\n배치점수", 92.dp, 44.dp, true, background = null, onClick = null)
-                            headers.forEachIndexed { colIdx, _ ->
-                                TableCell("${colScoreSum[colIdx]}점", 88.dp, 44.dp, false, background = null, onClick = null)
-                            }
-                        }
                     }
                 }
             }
-
-            // 하단 합계 텍스트
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = "배치점수 합계 : ",
-                    style = MaterialTheme.typography.bodyMedium
-                )
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    text = "${totalScore}점",
-                    style = MaterialTheme.typography.bodyMedium
-                )
-            }
         }
 
-        // ✅ 우측 하단 "준비 완료" 버튼
-        Button(
-            onClick = { showConfirmDialog = true },
-            enabled = isAllPlaced && !isLocked,
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(
-                    end = 16.dp,
-                    bottom = navBarPadding.calculateBottomPadding() + 16.dp
-                )
-        ) {
-            Text("준비 완료")
-        }
-
-        // ✅ 준비 완료 확인 다이얼로그
+        // ✅ Confirm Dialog
         if (showConfirmDialog) {
             AlertDialog(
-                onDismissRequest = { showConfirmDialog = false },
+                onDismissRequest = { if (!isSubmitting) showConfirmDialog = false },
                 title = { Text("준비 완료") },
-                text = {
-                    Text("준비 완료 이후에는 전력을 재배치할 수 없습니다. 이대로 배치를 완료하시겠습니까?")
-                },
+                text = { Text("준비 완료 이후에는 전력을 재배치할 수 없습니다. 이대로 배치를 완료하시겠습니까?") },
                 confirmButton = {
                     Button(
+                        enabled = !isSubmitting,
                         onClick = {
                             showConfirmDialog = false
-                            isLocked = true
-                            showToast("배치가 완료되었습니다.")
+                            isSubmitting = true
+
+                            val doc = PowerPlacement(
+                                teamId = teamId,
+                                placements = toPlacementDtos(placements)
+                            )
+
+                            repo.savePlacement(
+                                doc = doc,
+                                onSuccess = {
+                                    teamRepo.updateStatusByTeamId(
+                                        teamId = teamId,
+                                        newStatus = "ready",
+                                        onSuccess = {
+                                            isSubmitting = false
+                                            isLocked = true
+                                            showToast("준비 완료! 대기 화면으로 이동합니다.")
+                                            onMoveToWaiting()
+                                        },
+                                        onFail = { e ->
+                                            isSubmitting = false
+                                            showToast("팀 상태 업데이트 실패: ${e.message ?: "unknown"}")
+                                        }
+                                    )
+                                },
+                                onFail = { e ->
+                                    isSubmitting = false
+                                    showToast("저장 실패: ${e.message ?: "unknown"}")
+                                }
+                            )
                         }
-                    ) {
-                        Text("확인")
-                    }
+                    ) { Text("확인") }
                 },
                 dismissButton = {
-                    TextButton(onClick = { showConfirmDialog = false }) {
-                        Text("취소")
-                    }
+                    TextButton(
+                        enabled = !isSubmitting,
+                        onClick = { showConfirmDialog = false }
+                    ) { Text("취소") }
                 }
             )
         }
 
-        // ✅ 토스트(스낵바) 표시 위치: 하단 중앙
         SnackbarHost(
             hostState = snackHostState,
             modifier = Modifier
@@ -517,8 +660,8 @@ private fun ShapeMiniPreview(
 @Composable
 private fun TableCell(
     text: String,
-    width: androidx.compose.ui.unit.Dp,
-    height: androidx.compose.ui.unit.Dp,
+    width: Dp,
+    height: Dp,
     isHeader: Boolean,
     background: Color? = null,
     onClick: (() -> Unit)? = null

@@ -4,8 +4,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -23,65 +21,140 @@ import com.google.firebase.firestore.ListenerRegistration
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LoginScreen(
-    onLoginSuccess: (team: String) -> Unit
+    onLoginSuccess: (team: Team, isManager: Boolean) -> Unit  // ✅ 변경
 ) {
-    var selectedTeam by remember { mutableStateOf<Team?>(null) }
-    var passwordInput by remember { mutableStateOf("") }
-
+    // -------------------------
     // Firestore 로딩 상태
+    // -------------------------
     var teams by remember { mutableStateOf<List<Team>>(emptyList()) }
-    var isLoading by remember { mutableStateOf(true) }
-    var errorMsg by remember { mutableStateOf<String?>(null) }
+    var managers by remember { mutableStateOf<List<Team>>(emptyList()) }
 
-    // 로그인 검증 에러 (예: 비번 불일치)
+    var isLoadingTeams by remember { mutableStateOf(true) }
+    var isLoadingManagers by remember { mutableStateOf(true) }
+
+    var errorTeams by remember { mutableStateOf<String?>(null) }
+    var errorManagers by remember { mutableStateOf<String?>(null) }
+
+    // -------------------------
+    // 팝업(로그인 다이얼로그) 상태
+    // -------------------------
+    var showLoginDialog by remember { mutableStateOf(false) }
+    var dialogTeam by remember { mutableStateOf<Team?>(null) }
+
+    // ✅ 팝업이 "운영팀 로그인"인지 구분
+    var dialogIsManager by remember { mutableStateOf(false) }
+
+    var passwordInput by remember { mutableStateOf("") }
     var loginError by remember { mutableStateOf<String?>(null) }
 
-    // ✅ Firestore: teams 컬렉션 실시간 구독
-    DisposableEffect(Unit) {
-        val db = FirebaseFirestore.getInstance()
-        val query = db.collection("teams").orderBy("order")
-
-        var reg: ListenerRegistration? = null
-        reg = query.addSnapshotListener { snapshot, e ->
-            if (e != null) {
-                errorMsg = e.message ?: "팀 목록을 불러오지 못했습니다."
-                isLoading = false
-                return@addSnapshotListener
-            }
-
-            val docs = snapshot?.documents.orEmpty()
-            val list = docs.mapNotNull { d ->
-                // Firestore 필드: id(Int), name(String), order(Int), password(String)
-                val idLong = d.getLong("id") ?: return@mapNotNull null
-                val name = d.getString("name") ?: return@mapNotNull null
-                val orderLong = d.getLong("order") ?: 0L
-                val pw = d.getString("password") ?: ""
-
-                Team(
-                    id = idLong.toInt(),
-                    name = name,
-                    order = orderLong.toInt(),
-                    password = pw
-                )
-            }
-
-            teams = list
-            isLoading = false
-            errorMsg = null
-
-            // 선택된 팀이 목록에서 사라졌으면 선택 해제
-            selectedTeam?.let { sel ->
-                if (teams.none { it.id == sel.id }) {
-                    selectedTeam = null
-                    passwordInput = ""
-                    loginError = null
-                }
-            }
-        }
-
-        onDispose { reg?.remove() }
+    fun openLoginDialog(team: Team, isManager: Boolean) {
+        dialogTeam = team
+        dialogIsManager = isManager
+        passwordInput = ""
+        loginError = null
+        showLoginDialog = true
     }
 
+    fun parseTeam(d: com.google.firebase.firestore.DocumentSnapshot): Team? {
+        val idLong = d.getLong("id") ?: return null
+        val name = d.getString("name") ?: return null
+        val orderLong = d.getLong("order") ?: 0L
+        val pw = d.getString("password") ?: ""
+        val status = d.getString("status") ?: "waiting"
+        return Team(
+            id = idLong.toInt(),
+            name = name,
+            order = orderLong.toInt(),
+            password = pw,
+            status = status
+        )
+    }
+
+    // -------------------------
+    // Firestore 구독: teams
+    // -------------------------
+    DisposableEffect(Unit) {
+        val db = FirebaseFirestore.getInstance()
+
+        var regTeams: ListenerRegistration? = null
+        regTeams = db.collection("teams")
+            .orderBy("order")
+            .addSnapshotListener { snapshot, e ->
+                if (e != null) {
+                    errorTeams = e.message ?: "팀 목록을 불러오지 못했습니다."
+                    isLoadingTeams = false
+                    return@addSnapshotListener
+                }
+
+                val list = snapshot?.documents.orEmpty()
+                    .mapNotNull { parseTeam(it) }
+
+                teams = list
+                isLoadingTeams = false
+                errorTeams = null
+
+                // 다이얼로그가 "팀"으로 열려있었는데 해당 팀이 사라졌으면 닫기
+                dialogTeam?.let { sel ->
+                    if (showLoginDialog && !dialogIsManager && list.none { it.id == sel.id }) {
+                        showLoginDialog = false
+                        dialogTeam = null
+                        passwordInput = ""
+                        loginError = null
+                    } else if (showLoginDialog && !dialogIsManager) {
+                        // 최신 정보로 동기화
+                        dialogTeam = list.firstOrNull { it.id == sel.id } ?: dialogTeam
+                    }
+                }
+            }
+
+        onDispose { regTeams?.remove() }
+    }
+
+    // -------------------------
+    // Firestore 구독: managers
+    // -------------------------
+    DisposableEffect(Unit) {
+        val db = FirebaseFirestore.getInstance()
+
+        var regManagers: ListenerRegistration? = null
+        regManagers = db.collection("managers")
+            .addSnapshotListener { snapshot, e ->
+                if (e != null) {
+                    errorManagers = e.message ?: "운영팀 목록을 불러오지 못했습니다."
+                    isLoadingManagers = false
+                    return@addSnapshotListener
+                }
+
+                val list = snapshot?.documents.orEmpty()
+                    .mapNotNull { parseTeam(it) }
+
+                managers = list
+                isLoadingManagers = false
+                errorManagers = null
+
+                // 다이얼로그가 "운영팀"으로 열려있었는데 해당 운영팀이 사라졌으면 닫기
+                dialogTeam?.let { sel ->
+                    if (showLoginDialog && dialogIsManager && list.none { it.id == sel.id }) {
+                        showLoginDialog = false
+                        dialogTeam = null
+                        passwordInput = ""
+                        loginError = null
+                    } else if (showLoginDialog && dialogIsManager) {
+                        // 최신 정보로 동기화
+                        dialogTeam = list.firstOrNull { it.id == sel.id } ?: dialogTeam
+                    }
+                }
+            }
+
+        onDispose { regManagers?.remove() }
+    }
+
+    val anyLoading = isLoadingTeams || isLoadingManagers
+    val anyError = errorTeams != null || errorManagers != null
+
+    // -------------------------
+    // UI
+    // -------------------------
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -90,29 +163,34 @@ fun LoginScreen(
     ) {
         Card(
             modifier = Modifier
-                .fillMaxWidth(0.7f)
+                .fillMaxWidth(0.8f)
                 .padding(24.dp),
             shape = RoundedCornerShape(16.dp),
             elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
         ) {
             Column(
-                modifier = Modifier.padding(32.dp),
+                modifier = Modifier.padding(24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(16.dp)
+                verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
                 Text("팀을 선택하세요", style = MaterialTheme.typography.titleLarge)
 
+                // -------------------------
+                // Teams 섹션
+                // -------------------------
+                SectionTitle("팀")
+
                 when {
-                    isLoading -> {
+                    isLoadingTeams -> {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.Center
                         ) { CircularProgressIndicator() }
                     }
 
-                    errorMsg != null -> {
+                    errorTeams != null -> {
                         Text(
-                            text = errorMsg!!,
+                            text = errorTeams!!,
                             color = MaterialTheme.colorScheme.error,
                             textAlign = TextAlign.Center
                         )
@@ -123,69 +201,173 @@ fun LoginScreen(
                     }
 
                     else -> {
-                        LazyRow(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.Center,
-                            contentPadding = PaddingValues(horizontal = 8.dp)
-                        ) {
-                            items(teams, key = { it.id }) { team ->
-                                TeamButton(
-                                    text = team.name, // ✅ name으로 표시
-                                    isSelected = selectedTeam?.id == team.id,
-                                    onClick = {
-                                        selectedTeam = team
-                                        passwordInput = ""
-                                        loginError = null
-                                    }
-                                )
-                                Spacer(modifier = Modifier.width(16.dp))
-                            }
-                        }
+                        ButtonGrid5(
+                            items = teams,
+                            onItemClick = { openLoginDialog(it, isManager = false) } // ✅
+                        )
                     }
                 }
 
-                // ✅ 로그인 에러 메시지(비번 불일치 등)
-                if (loginError != null) {
+                Spacer(Modifier.height(8.dp))
+
+                // -------------------------
+                // Managers 섹션
+                // -------------------------
+                SectionTitle("운영팀")
+
+                when {
+                    isLoadingManagers -> {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.Center
+                        ) { CircularProgressIndicator() }
+                    }
+
+                    errorManagers != null -> {
+                        Text(
+                            text = errorManagers!!,
+                            color = MaterialTheme.colorScheme.error,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+
+                    managers.isEmpty() -> {
+                        Text("등록된 운영팀이 없습니다.", textAlign = TextAlign.Center)
+                    }
+
+                    else -> {
+                        ButtonGrid5(
+                            items = managers,
+                            onItemClick = { openLoginDialog(it, isManager = true) } // ✅
+                        )
+                    }
+                }
+
+                if (anyError && !anyLoading) {
+                    Spacer(Modifier.height(6.dp))
                     Text(
-                        text = loginError!!,
+                        text = "일부 목록을 불러오지 못했습니다.",
                         color = MaterialTheme.colorScheme.error,
                         textAlign = TextAlign.Center
                     )
                 }
+            }
+        }
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
-                    OutlinedTextField(
-                        value = passwordInput,
-                        onValueChange = {
-                            passwordInput = it
-                            loginError = null
-                        },
-                        label = { Text("비밀번호") },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        modifier = Modifier.weight(1f),
-                        enabled = selectedTeam != null && !isLoading && errorMsg == null
-                    )
+        // -------------------------
+        // 로그인 다이얼로그 (팀/운영팀 공통)
+        // -------------------------
+        if (showLoginDialog && dialogTeam != null) {
+            val team = dialogTeam!!
+            val titleText = if (dialogIsManager) "운영팀 로그인" else "팀 로그인"
 
+            AlertDialog(
+                onDismissRequest = {
+                    showLoginDialog = false
+                    dialogTeam = null
+                    passwordInput = ""
+                    loginError = null
+                },
+                title = { Text(titleText) },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("선택: ${team.name}")
+
+                        OutlinedTextField(
+                            value = passwordInput,
+                            onValueChange = {
+                                passwordInput = it
+                                loginError = null
+                            },
+                            label = { Text("비밀번호") },
+                            singleLine = true,
+                            visualTransformation = PasswordVisualTransformation(),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        if (loginError != null) {
+                            Text(
+                                text = loginError!!,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
                     Button(
+                        enabled = passwordInput.isNotEmpty(),
                         onClick = {
-                            val team = selectedTeam ?: return@Button
                             if (passwordInput == team.password) {
                                 loginError = null
-                                onLoginSuccess(team.name)
+                                showLoginDialog = false
+
+                                onLoginSuccess(
+                                    team.copy(password = ""),
+                                    dialogIsManager
+                                )
                             } else {
                                 loginError = "비밀번호가 올바르지 않습니다."
                             }
-                        },
-                        modifier = Modifier.height(56.dp),
-                        enabled = selectedTeam != null && passwordInput.isNotEmpty() && !isLoading && errorMsg == null
-                    ) {
-                        Text("로그인", fontSize = 16.sp)
-                    }
+                        }
+                    ) { Text("로그인") }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = {
+                            showLoginDialog = false
+                            dialogTeam = null
+                            passwordInput = ""
+                            loginError = null
+                        }
+                    ) { Text("취소") }
+                }
+            )
+        }
+    }
+}
+
+@Composable
+private fun SectionTitle(text: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.Start
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.titleMedium
+        )
+    }
+}
+
+/**
+ * ✅ 한 줄에 최대 5개씩 버튼을 배치하는 그리드
+ */
+@Composable
+private fun ButtonGrid5(
+    items: List<Team>,
+    onItemClick: (Team) -> Unit
+) {
+    val chunked = remember(items) { items.chunked(5) }
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        chunked.forEach { rowItems ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                rowItems.forEach { team ->
+                    TeamButton(
+                        text = team.name,
+                        onClick = { onItemClick(team) },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                repeat(5 - rowItems.size) {
+                    Spacer(modifier = Modifier.weight(1f))
                 }
             }
         }
@@ -193,18 +375,19 @@ fun LoginScreen(
 }
 
 @Composable
-fun TeamButton(text: String, isSelected: Boolean, onClick: () -> Unit) {
-    val backgroundColor = if (isSelected) MaterialTheme.colorScheme.primary else Color.LightGray
-    val contentColor = if (isSelected) MaterialTheme.colorScheme.onPrimary else Color.Black
-
+fun TeamButton(
+    text: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
     Box(
-        modifier = Modifier
-            .size(width = 120.dp, height = 60.dp)
-            .background(backgroundColor, shape = RoundedCornerShape(8.dp))
-            .border(1.dp, Color.Gray, RoundedCornerShape(8.dp))
+        modifier = modifier
+            .height(56.dp)
+            .background(Color.LightGray, shape = RoundedCornerShape(10.dp))
+            .border(1.dp, Color.Gray, RoundedCornerShape(10.dp))
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
-        Text(text = text, color = contentColor, textAlign = TextAlign.Center)
+        Text(text = text, textAlign = TextAlign.Center, fontSize = 15.sp)
     }
 }
