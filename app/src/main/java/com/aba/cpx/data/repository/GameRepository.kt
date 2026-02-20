@@ -42,6 +42,27 @@ class GameRepository(
     private fun turnsCol(gameId: String) =
         db.collection("games").document(gameId).collection("turns")
 
+    // -------------------------------------------
+    // ✅ state 파싱: 신버전(key) + 구버전(READY/RUNNING/...) 자동 매핑
+    // -------------------------------------------
+    private fun parseGameState(stateStr: String?): GameState {
+        if (stateStr.isNullOrBlank()) return GameState.WAITING
+
+        // 1) 신버전 키 매칭
+        val normalized = stateStr.trim().lowercase()
+        GameState.entries.firstOrNull { it.key == normalized }?.let { return it }
+
+        // 2) 구버전 대문자/enum name 매핑 (DB 마이그레이션 없이)
+        return when (stateStr.trim().uppercase()) {
+            "READY" -> GameState.WAITING
+            "RUNNING" -> GameState.WORKING
+            "PAUSED" -> GameState.PAUSED
+            "FINISHED" -> GameState.COMPLETED
+            "ABORTED" -> GameState.COMPLETED
+            else -> GameState.WAITING
+        }
+    }
+
     // -------------------------------
     // 점수 map 변환
     // -------------------------------
@@ -183,7 +204,7 @@ class GameRepository(
     }
 
     // -------------------------------
-    // ✅ 라이브 게임 문서 없으면 READY 생성
+    // ✅ 라이브 게임 문서 없으면 WAITING 생성
     // -------------------------------
     fun ensureLiveGameExists(
         gameId: String,
@@ -199,7 +220,8 @@ class GameRepository(
                 }
 
                 val data = hashMapOf<String, Any?>(
-                    "state" to GameState.READY.name,
+                    // ✅ state는 DB에 key로 저장
+                    "state" to GameState.WAITING.key,
                     "order" to emptyList<Map<String, Any>>(),
                     "turnIndex" to 0,
                     "currentTeamId" to null,
@@ -246,9 +268,8 @@ class GameRepository(
                 }
 
                 try {
-                    val stateStr = snap.getString("state") ?: GameState.READY.name
-                    val state = runCatching { GameState.valueOf(stateStr) }
-                        .getOrDefault(GameState.READY)
+                    val stateStr = snap.getString("state")
+                    val state = parseGameState(stateStr)
 
                     val orderList = (snap.get("order") as? List<Map<String, Any>>)
                         .orEmpty()
@@ -261,7 +282,6 @@ class GameRepository(
                         }
 
                     val scores = parseScoresMap(snap.get("scoresByTeamId"))
-                    // ✅ 추가: 원점수
                     val initialScores = parseScoresMap(snap.get("initialScoresByTeamId"))
 
                     val attackedTargetsByTeamId =
@@ -280,7 +300,6 @@ class GameRepository(
                         endedAt = snap.getTimestamp("endedAt")?.toDate()?.time,
                         updatedAt = snap.getTimestamp("updatedAt")?.toDate()?.time,
                         scoresByTeamId = scores,
-                        // ✅ 추가
                         initialScoresByTeamId = initialScores,
                         attackedTargetsByTeamId = attackedTargetsByTeamId,
                         lastTargetByTeamId = lastTargetByTeamId
@@ -319,6 +338,7 @@ class GameRepository(
 
         val tasks: List<Task<DocumentSnapshot?>> = sorted.map { t -> fetchPlacementSnapshot(t.id) }
         Log.d("kkh", "tasks ${tasks.size}")
+
         Tasks.whenAllSuccess<DocumentSnapshot?>(tasks)
             .addOnSuccessListener { snaps ->
                 val scoreByTeam = mutableMapOf<Int, Int>()
@@ -333,12 +353,12 @@ class GameRepository(
                 db.runTransaction { tx ->
                     val snap = tx.get(ref)
 
-                    val currentStateStr = snap.getString("state") ?: GameState.READY.name
-                    val currentState = runCatching { GameState.valueOf(currentStateStr) }
-                        .getOrDefault(GameState.READY)
+                    val currentStateStr = snap.getString("state")
+                    val currentState = parseGameState(currentStateStr)
 
-                    if (snap.exists() && (currentState == GameState.RUNNING || currentState == GameState.PAUSED)) {
-                        throw IllegalStateException("이미 게임이 진행중입니다. (state=$currentState)")
+                    // ✅ working/paused이면 진행중 취급
+                    if (snap.exists() && (currentState == GameState.WORKING || currentState == GameState.PAUSED)) {
+                        throw IllegalStateException("이미 게임이 진행중입니다. (state=${currentState.key})")
                     }
 
                     val firstTeamId = sorted.first().id
@@ -346,16 +366,14 @@ class GameRepository(
                     tx.set(
                         ref,
                         mapOf(
-                            "state" to GameState.RUNNING.name,
+                            "state" to GameState.WORKING.key,
                             "order" to orderSnapshot,
                             "turnIndex" to 0,
                             "currentTeamId" to firstTeamId,
                             "turnToken" to UUID.randomUUID().toString(),
                             "lastAttackedTeamId" to null,
                             "scoresByTeamId" to scoresInitFs,
-                            // ✅ 추가: 원점수 저장
                             "initialScoresByTeamId" to scoresInitFs,
-                            // ✅ 공격기록 초기화
                             "attackedTargetsByTeamId" to emptyMap<String, List<Int>>(),
                             "lastTargetByTeamId" to emptyMap<String, Int>(),
                             "startedAt" to FieldValue.serverTimestamp(),
@@ -375,193 +393,15 @@ class GameRepository(
     }
 
     fun pauseGame(gameId: String, onSuccess: () -> Unit, onFail: (Exception) -> Unit) {
-        setState(gameId, from = GameState.RUNNING, to = GameState.PAUSED, onSuccess, onFail)
+        setState(gameId, from = GameState.WORKING, to = GameState.PAUSED, onSuccess, onFail)
     }
 
     fun resumeGame(gameId: String, onSuccess: () -> Unit, onFail: (Exception) -> Unit) {
-        setState(gameId, from = GameState.PAUSED, to = GameState.RUNNING, onSuccess, onFail)
-    }
-
-    // -------------------------------
-    // ✅ 종료 + 아카이브 + READY 초기화
-    // -------------------------------
-    fun finishGameWithArchiveAndReset(
-        liveGameId: String,
-        onSuccess: (archiveGameId: String) -> Unit,
-        onFail: (Exception) -> Unit
-    ) {
-        val liveRef = gameRef(liveGameId)
-
-        val fmt = SimpleDateFormat("yyyyMMddHHmm", Locale.KOREA)
-        val archiveId = fmt.format(Date())
-        val archiveRef = gameRef(archiveId)
-
-        db.runTransaction { tx ->
-            val snap = tx.get(liveRef)
-            if (!snap.exists()) {
-                tx.set(
-                    liveRef,
-                    mapOf(
-                        "state" to GameState.READY.name,
-                        "order" to emptyList<Map<String, Any>>(),
-                        "turnIndex" to 0,
-                        "currentTeamId" to null,
-                        "turnToken" to null,
-                        "lastAttackedTeamId" to null,
-                        "scoresByTeamId" to emptyMap<String, Int>(),
-                        "initialScoresByTeamId" to emptyMap<String, Int>(),
-                        "attackedTargetsByTeamId" to emptyMap<String, List<Int>>(),
-                        "lastTargetByTeamId" to emptyMap<String, Int>(),
-                        "startedAt" to null,
-                        "endedAt" to null,
-                        "updatedAt" to FieldValue.serverTimestamp(),
-                    ),
-                    SetOptions.merge()
-                )
-                throw IllegalStateException("라이브 게임 문서가 없어 READY로 생성했습니다. 다시 시도하세요.")
-            }
-
-            val stateStr = snap.getString("state") ?: GameState.READY.name
-            val state = runCatching { GameState.valueOf(stateStr) }.getOrDefault(GameState.READY)
-
-            if (state != GameState.RUNNING && state != GameState.PAUSED) {
-                throw IllegalStateException("종료할 수 없는 상태입니다. (state=$state)")
-            }
-
-            val order = (snap.get("order") as? List<Map<String, Any>>).orEmpty()
-            val turnIndex = (snap.getLong("turnIndex") ?: 0L).toInt()
-            val currentTeamId = snap.getLong("currentTeamId")?.toInt()
-            val turnToken = snap.getString("turnToken")
-            val startedAt = snap.get("startedAt")
-
-            val scores = snap.get("scoresByTeamId") ?: emptyMap<String, Int>()
-            val initialScores = snap.get("initialScoresByTeamId") ?: emptyMap<String, Int>()
-
-            val lastAttackedTeamId = snap.get("lastAttackedTeamId")
-            val attackedTargetsByTeamId =
-                snap.get("attackedTargetsByTeamId") ?: emptyMap<String, List<Int>>()
-            val lastTargetByTeamId = snap.get("lastTargetByTeamId") ?: emptyMap<String, Int>()
-
-            tx.set(
-                archiveRef,
-                mapOf(
-                    "state" to GameState.FINISHED.name,
-                    "order" to order,
-                    "turnIndex" to turnIndex,
-                    "currentTeamId" to currentTeamId,
-                    "turnToken" to turnToken,
-                    "lastAttackedTeamId" to lastAttackedTeamId,
-                    "scoresByTeamId" to scores,
-                    "initialScoresByTeamId" to initialScores,
-                    "attackedTargetsByTeamId" to attackedTargetsByTeamId,
-                    "lastTargetByTeamId" to lastTargetByTeamId,
-                    "startedAt" to startedAt,
-                    "endedAt" to FieldValue.serverTimestamp(),
-                    "updatedAt" to FieldValue.serverTimestamp(),
-                    "sourceLiveGameId" to liveGameId,
-                ),
-                SetOptions.merge()
-            )
-
-            // 라이브 FINISHED 찍고(기록용)
-            tx.update(
-                liveRef,
-                mapOf(
-                    "state" to GameState.FINISHED.name,
-                    "endedAt" to FieldValue.serverTimestamp(),
-                    "updatedAt" to FieldValue.serverTimestamp()
-                )
-            )
-
-            // READY 초기화
-            tx.set(
-                liveRef,
-                mapOf(
-                    "state" to GameState.READY.name,
-                    "order" to emptyList<Map<String, Any>>(),
-                    "turnIndex" to 0,
-                    "currentTeamId" to null,
-                    "turnToken" to null,
-                    "lastAttackedTeamId" to null,
-                    "scoresByTeamId" to emptyMap<String, Int>(),
-                    "initialScoresByTeamId" to emptyMap<String, Int>(),
-                    "attackedTargetsByTeamId" to emptyMap<String, List<Int>>(),
-                    "lastTargetByTeamId" to emptyMap<String, Int>(),
-                    "startedAt" to null,
-                    "endedAt" to null,
-                    "updatedAt" to FieldValue.serverTimestamp(),
-                ),
-                SetOptions.merge()
-            )
-
-            archiveId
-        }.addOnSuccessListener { id -> onSuccess(id) }
-            .addOnFailureListener { e -> onFail(e as? Exception ?: Exception(e)) }
-    }
-
-    // -------------------------------
-    // ✅ 강제로 다음 턴으로 이동
-    // -------------------------------
-    fun forceAdvanceTurn(gameId: String, onSuccess: () -> Unit, onFail: (Exception) -> Unit) {
-        val ref = gameRef(gameId)
-
-        db.runTransaction { tx ->
-            val snap = tx.get(ref)
-            if (!snap.exists()) throw IllegalStateException("게임 문서가 없습니다.")
-
-            val stateStr = snap.getString("state") ?: GameState.READY.name
-            val state = runCatching { GameState.valueOf(stateStr) }
-                .getOrDefault(GameState.READY)
-
-            if (state != GameState.RUNNING) {
-                throw IllegalStateException("RUNNING 상태에서만 가능합니다. (state=$state)")
-            }
-
-            val turnIndex = (snap.getLong("turnIndex") ?: 0L).toInt()
-            val orderList = (snap.get("order") as? List<Map<String, Any>>).orEmpty()
-            if (orderList.isEmpty()) throw IllegalStateException("order가 비어 있습니다.")
-
-            val teamCount = orderList.size
-            val maxTurns = teamCount * MAX_ROUNDS
-            val nextIndex = turnIndex + 1
-
-            if (nextIndex >= maxTurns) {
-                tx.update(
-                    ref,
-                    mapOf(
-                        "state" to GameState.FINISHED.name,
-                        "turnIndex" to nextIndex,
-                        "currentTeamId" to null,
-                        "turnToken" to null,
-                        "endedAt" to FieldValue.serverTimestamp(),
-                        "updatedAt" to FieldValue.serverTimestamp()
-                    )
-                )
-            } else {
-                val nextTeamId = (orderList[nextIndex % teamCount]["teamId"] as? Number)?.toInt()
-                    ?: throw IllegalStateException("nextTeamId 파싱 실패")
-
-                tx.update(
-                    ref,
-                    mapOf(
-                        "turnIndex" to nextIndex,
-                        "currentTeamId" to nextTeamId,
-                        "turnToken" to UUID.randomUUID().toString(),
-                        "updatedAt" to FieldValue.serverTimestamp()
-                    )
-                )
-            }
-            null
-        }.addOnSuccessListener { onSuccess() }
-            .addOnFailureListener { e -> onFail(e as? Exception ?: Exception(e)) }
+        setState(gameId, from = GameState.PAUSED, to = GameState.WORKING, onSuccess, onFail)
     }
 
     // -------------------------------
     // ✅ 공격 턴 제출
-    // - 타겟 전력배치 placements와 비교해서 "맞춘 칸"만 점수 차감
-    // - 타겟 전력배치에 hitCells 누적
-    // - lastAttackedTeamId 갱신 + 턴 진행
-    // - attackedTargetsByTeamId / lastTargetByTeamId 업데이트 (DB 유지)
     // -------------------------------
     fun submitTurn(
         gameId: String,
@@ -607,14 +447,14 @@ class GameRepository(
                     val gSnap = tx.get(gRef)
                     if (!gSnap.exists()) throw IllegalStateException("game not found")
 
-                    val state = gSnap.getString("state") ?: GameState.READY.name
+                    val state = parseGameState(gSnap.getString("state"))
                     val currentTeamId = (gSnap.getLong("currentTeamId") ?: -1L).toInt()
                     val serverToken = gSnap.getString("turnToken") ?: ""
                     val turnIndex = (gSnap.getLong("turnIndex") ?: 0L).toInt()
 
                     val lastAttackedServer = gSnap.getLong("lastAttackedTeamId")?.toInt() ?: -1
 
-                    if (state != GameState.RUNNING.name) throw IllegalStateException("not running")
+                    if (state != GameState.WORKING) throw IllegalStateException("not working")
                     if (currentTeamId != teamId) throw IllegalStateException("not your turn")
                     if (serverToken.isBlank() || serverToken != turnToken) {
                         throw IllegalStateException("invalid turn token")
@@ -706,9 +546,13 @@ class GameRepository(
                         "attackedTargetsByTeamId.${teamId}" to FieldValue.arrayUnion(targetTeamId),
                     )
 
+                    // ✅ 마지막 턴이 끝났으면 "즉시 종료" (11R로 넘어가는 상태를 만들지 않음)
                     if (nextIndex >= maxTurns) {
-                        updatesGame["state"] = GameState.FINISHED.name
-                        updatesGame["turnIndex"] = nextIndex
+                        updatesGame["state"] = GameState.COMPLETED.key
+
+                        // ✅ 핵심: turnIndex를 maxTurns로 올리지 않고, 마지막 유효 턴(maxTurns-1)에 고정
+                        updatesGame["turnIndex"] = (maxTurns - 1).coerceAtLeast(0)
+
                         updatesGame["currentTeamId"] = null
                         updatesGame["turnToken"] = null
                         updatesGame["endedAt"] = FieldValue.serverTimestamp()
@@ -829,16 +673,16 @@ class GameRepository(
             val snap = tx.get(ref)
             if (!snap.exists()) throw IllegalStateException("게임 문서가 없습니다.")
 
-            val stateStr = snap.getString("state") ?: GameState.READY.name
-            val state = runCatching { GameState.valueOf(stateStr) }
-                .getOrDefault(GameState.READY)
+            val state = parseGameState(snap.getString("state"))
 
-            if (state != from) throw IllegalStateException("$from 상태에서만 $to 로 변경 가능합니다. (state=$state)")
+            if (state != from) {
+                throw IllegalStateException("${from.key} 상태에서만 ${to.key} 로 변경 가능합니다. (state=${state.key})")
+            }
 
             tx.update(
                 ref,
                 mapOf(
-                    "state" to to.name,
+                    "state" to to.key,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
             )

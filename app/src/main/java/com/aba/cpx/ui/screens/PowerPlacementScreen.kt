@@ -1,6 +1,7 @@
 package com.aba.cpx.ui.screens
 
 import android.annotation.SuppressLint
+import android.util.Log
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -30,16 +31,15 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.times
 import com.aba.cpx.data.model.CellDto
+import com.aba.cpx.data.model.ColumnHeader
 import com.aba.cpx.data.model.PlacementDto
 import com.aba.cpx.data.model.PowerPlacement
+import com.aba.cpx.data.model.TeamStatus
+import com.aba.cpx.data.model.headers
+import com.aba.cpx.data.model.rows
 import com.aba.cpx.data.repository.PowerPlacementRepository
 import com.aba.cpx.data.repository.TeamRepository
 import kotlinx.coroutines.launch
-
-private data class ColumnHeader(
-    val title: String,
-    val scoreText: String
-)
 
 private enum class UnitType { TANK, CANNON1, CANNON2, CANNON3, INFANTRY }
 
@@ -63,23 +63,6 @@ fun PowerPlacementScreen(
     status: String,
     onMoveToWaiting: () -> Unit
 ) {
-    val headers = listOf(
-        ColumnHeader("사복부", "10점"),
-        ColumnHeader("통신대", "10점"),
-        ColumnHeader("레이더", "8점"),
-        ColumnHeader("무기고", "8점"),
-        ColumnHeader("보급소", "6점"),
-        ColumnHeader("비행장", "6점"),
-        ColumnHeader("병원", "4점"),
-        ColumnHeader("방송국", "4점"),
-        ColumnHeader("발전소", "2점"),
-        ColumnHeader("철도", "2점"),
-    )
-
-    val rows = listOf(
-        "서울", "수원", "인천", "오산", "천안",
-        "대전", "전주", "광주", "대구", "부산"
-    )
 
     val colsCount = headers.size
     val rowsCount = rows.size
@@ -100,18 +83,8 @@ fun PowerPlacementScreen(
         }
     }
 
-    // ✅ status -> 한글
-    val statusKo = remember(status) {
-        when (status.lowercase()) {
-            "waiting" -> "대기중"
-            "ready" -> "준비 완료"
-            "working" -> "진행중"
-            "completed" -> "완료"
-            "paused" -> "중지"
-            else -> status
-        }
-    }
-
+    val statusKo = remember(status) { TeamStatus.fromKey(status).labelKo }
+    Log.d("KKH","PowerPlacementScreen statusKo ${statusKo}")
     // ✅ 점수 파싱
     val colPoints: List<Int> = remember(headers) {
         headers.map { h -> h.scoreText.filter { it.isDigit() }.toIntOrNull() ?: 0 }

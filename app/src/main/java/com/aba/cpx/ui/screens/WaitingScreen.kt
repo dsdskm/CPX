@@ -47,7 +47,7 @@ fun WaitingScreen(
     // ✅ 상태 변하면 화면 이동
     LaunchedEffect(game?.state, game?.currentTeamId) {
         val g = game ?: return@LaunchedEffect
-        if (g.state != GameState.RUNNING) return@LaunchedEffect
+        if (g.state == GameState.WAITING) return@LaunchedEffect
 
         if (g.currentTeamId == teamId) {
             onGoAttack()

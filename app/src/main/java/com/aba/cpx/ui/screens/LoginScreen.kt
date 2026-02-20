@@ -15,13 +15,15 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.aba.cpx.data.model.Team
+import com.aba.cpx.data.model.TeamStatus
+import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LoginScreen(
-    onLoginSuccess: (team: Team, isManager: Boolean) -> Unit  // ✅ 변경
+    onLoginSuccess: (team: Team, isManager: Boolean) -> Unit
 ) {
     // -------------------------
     // Firestore 로딩 상태
@@ -55,18 +57,24 @@ fun LoginScreen(
         showLoginDialog = true
     }
 
-    fun parseTeam(d: com.google.firebase.firestore.DocumentSnapshot): Team? {
+    // ✅ Firestore 문서 -> Team 변환 (status: String -> TeamStatus)
+    fun parseTeam(d: DocumentSnapshot): Team? {
         val idLong = d.getLong("id") ?: return null
         val name = d.getString("name") ?: return null
         val orderLong = d.getLong("order") ?: 0L
         val pw = d.getString("password") ?: ""
-        val status = d.getString("status") ?: "waiting"
+
+        // DB에는 영어 문자열로 저장되어 있고, 앱에서는 enum으로 사용
+        // - null/이상값이면 fromKey에서 PREPARING으로 기본 처리됨
+        val statusKey = d.getString("status") ?: "preparing"
+        val statusEnum = TeamStatus.fromKey(statusKey)
+
         return Team(
             id = idLong.toInt(),
             name = name,
             order = orderLong.toInt(),
             password = pw,
-            status = status
+            status = statusEnum
         )
     }
 
@@ -203,7 +211,7 @@ fun LoginScreen(
                     else -> {
                         ButtonGrid5(
                             items = teams,
-                            onItemClick = { openLoginDialog(it, isManager = false) } // ✅
+                            onItemClick = { openLoginDialog(it, isManager = false) }
                         )
                     }
                 }
@@ -238,7 +246,7 @@ fun LoginScreen(
                     else -> {
                         ButtonGrid5(
                             items = managers,
-                            onItemClick = { openLoginDialog(it, isManager = true) } // ✅
+                            onItemClick = { openLoginDialog(it, isManager = true) }
                         )
                     }
                 }

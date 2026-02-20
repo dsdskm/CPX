@@ -15,8 +15,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -25,94 +24,109 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.aba.cpx.data.model.Game
 import com.aba.cpx.data.model.GameState
-import kotlin.math.max
 
-enum class TurnBarMode { VIEW, ATTACK }
+enum class GameInfoBarMode { VIEW, ATTACK }
 
 @Composable
-fun TurnOrderBar(
+fun GameInfoBar(
     game: Game?,
     myTeamId: Int? = null,
     myTeamName: String? = null,
-    mode: TurnBarMode = TurnBarMode.VIEW,
+    mode: GameInfoBarMode = GameInfoBarMode.VIEW,
+
+    // ATTACK에서 선택 카운트 표시용(원하면 유지)
     selectedCount: Int = 0,
     requiredCount: Int = 3,
-    score: Int? = null, // (옵션) 강제로 현재점수만 override 하고 싶을 때
+
+    // (옵션) 현재 점수 override
+    score: Int? = null,
+
     onBack: (() -> Unit)? = null,
+
     overrideOrder: List<Pair<Int, String>>? = null,
     overrideScoresByTeamId: Map<Int, Int>? = null,
-    rightContent: (@Composable () -> Unit)? = null,
-    showScoresInOrderChips: Boolean = false, // ✅ 운영 계정에서만 true
-) {
-    val state = game?.state ?: GameState.READY
 
-    val order = (overrideOrder?.mapIndexed { idx, (id, name) ->
+    // ✅ 내 턴이면 공격 대상 선택
+    selectedTargetId: Int? = null,
+    onTargetSelected: ((targetTeamId: Int) -> Unit)? = null,
+
+    showScoresInOrderChips: Boolean = false,
+) {
+    val state = game?.state ?: GameState.WAITING
+
+    val order: List<Triple<Int, String, Int>> = (overrideOrder?.mapIndexed { idx, (id, name) ->
         Triple(id, name, idx + 1)
-    } ?: game?.order.orEmpty().sortedBy { it.order }.map {
-        Triple(it.teamId, it.teamName, it.order)
-    }).sortedBy { it.third }
+    } ?: game?.order.orEmpty()
+        .sortedBy { it.order }
+        .map { Triple(it.teamId, it.teamName, it.order) }
+            ).sortedBy { it.third }
 
     val totalTeams = order.size
     val turnIndex = game?.turnIndex ?: 0
     val currentTeamId = game?.currentTeamId
 
+    // ✅ 라운드/포지션(정지 중에도 동일 계산)
     val round = if (totalTeams <= 0) 0 else (turnIndex / totalTeams) + 1
     val posInRound = if (totalTeams <= 0) 0 else (turnIndex % totalTeams) + 1
     val roundShown = if (round <= 0) 0 else minOf(round, 10)
 
-    val currentTeamName =
-        order.firstOrNull { it.first == currentTeamId }?.second
-            ?: (currentTeamId?.toString() ?: "-")
-
     val scores = overrideScoresByTeamId ?: game?.scoresByTeamId.orEmpty()
-    val initialScores = game?.initialScoresByTeamId.orEmpty()
+    val myScore = score ?: (if (myTeamId == null) 0 else (scores[myTeamId] ?: 0))
 
-    // ✅ 점수는 "내 팀" 기준으로 계산 (요구사항)
-    val scoreTeamId = myTeamId ?: currentTeamId
-    val currentScore = if (scoreTeamId == null) 0 else (scores[scoreTeamId] ?: 0)
-    val initialScore = if (scoreTeamId == null) null else initialScores[scoreTeamId]
-
-    // ✅ 외부에서 score를 넘기면 '현재점수'만 override (초기점수는 그대로)
-    val currentShown = score ?: currentScore
-    val delta = if (initialScore == null) null else max(initialScore - currentShown, 0)
-
-    // ✅ 시작/현재/감소를 "구분해서" 출력
-    val scoreLabel = if (initialScore != null && delta != null) {
-        "시작: ${initialScore}점 · 현재: ${currentShown}점 · 감소: -${delta}점"
-    } else {
-        "현재: ${currentShown}점"
+    // ✅ 내 턴 판단은 "WORKING일 때만" 공격 가능
+    val isMyTurn = remember(state, currentTeamId, myTeamId) {
+        state == GameState.WORKING && myTeamId != null && currentTeamId == myTeamId
     }
 
-    val viewTeamName = myTeamName ?: "-"
-
-    val stateLabelKo = when (state) {
-        GameState.READY -> "대기"
-        GameState.RUNNING -> "진행"
-        GameState.PAUSED -> "일시중지"
-        GameState.FINISHED -> "종료"
-        GameState.ABORTED -> "중단됨"
-        else -> state.name
+    // ✅ 내 턴이 아닐 때 마지막 공격팀 표시
+    val lastTargetId = remember(game, myTeamId) {
+        if (myTeamId == null) null else game?.lastTargetByTeamId?.get(myTeamId)
     }
-    val stateColor = when (state) {
-        GameState.READY -> Color(0xFF9E9E9E)
-        GameState.RUNNING -> Color(0xFF2196F3)
-        GameState.PAUSED -> Color(0xFFFF9800)
-        GameState.FINISHED -> Color(0xFF4CAF50)
-        GameState.ABORTED -> MaterialTheme.colorScheme.error
-        else -> Color(0xFF9E9E9E)
+    val lastTargetName = remember(lastTargetId, order) {
+        if (lastTargetId == null) "-" else (order.firstOrNull { it.first == lastTargetId }?.second ?: lastTargetId.toString())
     }
 
-    val line1 = buildString {
-        append("상태: $stateLabelKo")
-        if (state == GameState.RUNNING && totalTeams > 0) {
-            append(" · 라운드: ${roundShown}R(${posInRound}/${totalTeams})")
-            append(" · 현재턴: $currentTeamName")
-        } else {
-            append(" · 현재: $currentTeamName")
+    val viewTeamName = myTeamName ?: (myTeamId?.toString() ?: "-")
+
+    // ✅ 내 턴일 때 타겟 후보(내 팀 제외)
+    val targetCandidates = remember(order, myTeamId) {
+        order.filter { it.first != myTeamId }.map { it.first to it.second }
+    }
+
+    var showTargetDialog by remember { mutableStateOf(false) }
+
+    // 1줄(좌): 라운드 + 내점수
+    val leftLine = buildString {
+        if (totalTeams > 0) append("${roundShown}R(${posInRound}/${totalTeams})") else append("-R")
+        append(" · ")
+        append("$viewTeamName ${myScore}점")
+        if (mode == GameInfoBarMode.ATTACK) append(" · 선택: $selectedCount/$requiredCount")
+    }
+
+    // 1줄(우)
+    val rightLine = if (isMyTurn) {
+        val selName = selectedTargetId?.let { id ->
+            order.firstOrNull { it.first == id }?.second ?: id.toString()
         }
-        append(" · 팀: $viewTeamName")
-        append(" · $scoreLabel")
+        if (selName != null) "대상: $selName" else "공격 대상 선택"
+    } else {
+        "마지막 공격: $lastTargetName"
     }
+
+    // ✅ 깜빡임 애니메이션 (PAUSED에서도 유지)
+    val infinite = rememberInfiniteTransition(label = "blink")
+    val blinkAlpha by infinite.animateFloat(
+        initialValue = 1f,
+        targetValue = 0.25f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 650),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "blinkAlpha"
+    )
+
+    // ✅ "현재턴 강조"는 WORKING뿐 아니라 PAUSED에서도 표시/깜빡임 유지
+    val shouldBlinkCurrent = remember(state) { state == GameState.WORKING || state == GameState.PAUSED }
 
     Surface(
         modifier = Modifier
@@ -126,6 +140,9 @@ fun TurnOrderBar(
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
+            // ----------------------
+            // 1줄: 라운드/내점수(좌) + (내턴이면 버튼 / 아니면 마지막공격)(우)
+            // ----------------------
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
@@ -138,48 +155,37 @@ fun TurnOrderBar(
                 }
 
                 Text(
-                    text = line1,
+                    text = leftLine,
                     style = MaterialTheme.typography.titleSmall,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
 
-                if (rightContent != null) {
-                    Spacer(Modifier.width(8.dp))
-                    rightContent()
-                    Spacer(Modifier.width(8.dp))
-                } else {
-                    Spacer(Modifier.width(8.dp))
-                }
+                Spacer(Modifier.width(10.dp))
 
-                Box(
-                    modifier = Modifier
-                        .background(stateColor, RoundedCornerShape(999.dp))
-                        .padding(horizontal = 10.dp, vertical = 6.dp)
-                ) {
+                if (isMyTurn && onTargetSelected != null) {
+                    OutlinedButton(
+                        onClick = { showTargetDialog = true },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        Text(text = rightLine, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                } else {
                     Text(
-                        text = stateLabelKo,
-                        color = Color.White,
-                        style = MaterialTheme.typography.labelMedium,
+                        text = rightLine,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFF555555),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                 }
             }
 
+            // ----------------------
+            // 2줄: 팀 순서 + 현재턴 깜빡임 (PAUSED에서도 유지)
+            // ----------------------
             if (order.isNotEmpty()) {
-                val infinite = rememberInfiniteTransition(label = "blink")
-                val blinkAlpha by infinite.animateFloat(
-                    initialValue = 1f,
-                    targetValue = 0.25f,
-                    animationSpec = infiniteRepeatable(
-                        animation = tween(durationMillis = 650),
-                        repeatMode = RepeatMode.Reverse
-                    ),
-                    label = "blinkAlpha"
-                )
-
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -187,16 +193,14 @@ fun TurnOrderBar(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     order.forEachIndexed { idx, (tid, tname, _) ->
-                        val isCurrent = (state == GameState.RUNNING && tid == currentTeamId)
+                        val isCurrent = (shouldBlinkCurrent && currentTeamId != null && tid == currentTeamId)
+
                         val chipBg = if (isCurrent) Color(0xFF7C4DFF) else Color(0xFFEFEFEF)
                         val chipFg = if (isCurrent) Color.White else Color(0xFF222222)
 
-                        // ✅ 운영 계정일 때만 점수 포함
                         val chipText = if (showScoresInOrderChips && scores.isNotEmpty()) {
                             "$tname ${scores[tid] ?: 0}점"
-                        } else {
-                            tname
-                        }
+                        } else tname
 
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -247,5 +251,45 @@ fun TurnOrderBar(
                 )
             }
         }
+    }
+
+    // ----------------------
+    // 공격 대상 선택 다이얼로그 (내 팀 제외)
+    // ----------------------
+    if (showTargetDialog && isMyTurn && onTargetSelected != null) {
+        AlertDialog(
+            onDismissRequest = { showTargetDialog = false },
+            title = { Text("공격 대상 선택") },
+            text = {
+                if (targetCandidates.isEmpty()) {
+                    Text("선택할 대상이 없습니다.")
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        targetCandidates.forEach { (id, name) ->
+                            val selected = (selectedTargetId == id)
+                            OutlinedButton(
+                                onClick = {
+                                    onTargetSelected(id)
+                                    showTargetDialog = false
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = if (selected) {
+                                    ButtonDefaults.outlinedButtonColors(containerColor = Color(0xFFEDE7F6))
+                                } else ButtonDefaults.outlinedButtonColors()
+                            ) {
+                                Text(
+                                    text = if (selected) "✓ $name" else name,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showTargetDialog = false }) { Text("닫기") }
+            }
+        )
     }
 }
