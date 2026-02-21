@@ -54,7 +54,7 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 
 /** ✅ status 타입 (Team 모델에 이미 정의돼 있으면 import해서 써도 됨) */
-type TeamStatus = "waiting" | "ready" | "working" | "paused" | "completed";
+type TeamStatus = "preparing" | "ready" | "working" |"completed";
 
 type TeamFormValues = {
     id: number;
@@ -133,18 +133,16 @@ function SortableRow(
 
 /** ✅ status 표시용 매핑 */
 const STATUS_LABEL: Record<TeamStatus, string> = {
-    waiting: "대기",
-    ready: "준비",
-    working: "진행",
-    paused: "중지",
-    completed: "완료",
+    preparing: "준비중",
+    ready: "준비 완료",
+    working: "진행중",
+    completed: "종료",
 };
 
 const STATUS_COLOR: Record<TeamStatus, string> = {
-    waiting: "default",
+    preparing: "default",
     ready: "blue",
     working: "green",
-    paused: "orange",
     completed: "purple",
 };
 
