@@ -2,18 +2,22 @@ package com.aba.cpx.data.repository
 
 import com.aba.cpx.data.model.Team
 import com.aba.cpx.data.model.TeamStatus
+import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
+import com.google.firebase.firestore.SetOptions
+import kotlinx.coroutines.tasks.await
 
 class TeamRepository(
     private val db: FirebaseFirestore = FirebaseFirestore.getInstance()
 ) {
+    private fun teamsCol() = db.collection("teams")
 
     fun listenTeams(
         onUpdate: (List<Team>) -> Unit,
         onError: (Exception) -> Unit
     ): ListenerRegistration {
-        return db.collection("teams")
+        return teamsCol()
             .orderBy("order")
             .addSnapshotListener { snapshot, e ->
                 if (e != null) {
@@ -27,8 +31,6 @@ class TeamRepository(
                     val orderLong = d.getLong("order") ?: 0L
                     val pw = d.getString("password") ?: ""
 
-                    // ✅ DB에는 영어 String이 저장되어 있음 → enum으로 안전 변환
-                    // - null/알 수 없는 값이면 PREPARING으로 처리됨(fromKey 내부)
                     val statusKey = d.getString("status")
                     val statusEnum = TeamStatus.fromKey(statusKey)
 
@@ -45,16 +47,13 @@ class TeamRepository(
             }
     }
 
-    /**
-     * ✅ (권장) 팀 상태 업데이트: enum으로 받아서 DB에는 key(String)로 저장
-     */
     fun updateStatusByTeamId(
         teamId: Int,
         newStatus: TeamStatus,
         onSuccess: () -> Unit,
         onFail: (Exception) -> Unit
     ) {
-        db.collection("teams")
+        teamsCol()
             .whereEqualTo("id", teamId)
             .limit(1)
             .get()
@@ -71,36 +70,59 @@ class TeamRepository(
             .addOnFailureListener { e -> onFail(e) }
     }
 
-    /**
-     * ✅ (권장) 모든 팀 상태를 일괄 변경: enum으로 받아서 DB에는 key(String)로 저장
-     */
     fun updateAllTeamsStatus(
         newStatus: TeamStatus,
         onSuccess: () -> Unit,
         onFail: (Exception) -> Unit
     ) {
-        db.collection("teams")
+        teamsCol()
             .get()
             .addOnSuccessListener { qs ->
                 val batch = db.batch()
                 qs.documents.forEach { doc ->
-                    batch.update(doc.reference, "status", newStatus.key)
+                    batch.update(
+                        doc.reference,
+                        mapOf(
+                            "status" to newStatus.key,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        )
+                    )
                 }
                 batch.commit()
                     .addOnSuccessListener { onSuccess() }
-                    .addOnFailureListener { e -> onFail(e) }
+                    .addOnFailureListener { e -> onFail(e as? Exception ?: Exception(e)) }
             }
-            .addOnFailureListener { e -> onFail(e) }
+            .addOnFailureListener { e -> onFail(e as? Exception ?: Exception(e)) }
+    }
+
+    /**
+     * ✅ GameRepository가 트랜잭션 안에서 teams 상태를 바꿔야 할 때 사용
+     * ⚠️ 전제: teams 문서 ID가 teamId(String) 형태로 저장되어 있어야 함
+     */
+    fun setTeamsStatusInTx(
+        tx: com.google.firebase.firestore.Transaction,
+        teamIds: List<Int>,
+        newStatus: TeamStatus
+    ) {
+        if (teamIds.isEmpty()) return
+
+        teamIds.distinct().forEach { tid ->
+            val tRef = teamsCol().document(tid.toString())
+            tx.set(
+                tRef,
+                mapOf(
+                    "status" to newStatus.key,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                ),
+                SetOptions.merge()
+            )
+        }
     }
 
     // ------------------------------------------------------------------
-    // ↓↓↓ 기존 코드 호환용: String 파라미터를 쓰는 호출부가 많으면 바로 깨지니까 유지
+    // ↓↓↓ 기존 코드 호환용: String 파라미터 버전 유지
     // ------------------------------------------------------------------
 
-    /**
-     * ⚠️ 기존 호환용 (비권장)
-     * String으로 들어온 값을 enum으로 정규화 후, DB에는 enum.key로 저장
-     */
     @Deprecated("TeamStatus 버전(updateStatusByTeamId(teamId, TeamStatus, ...))을 사용하세요.")
     fun updateStatusByTeamId(
         teamId: Int,
@@ -112,10 +134,6 @@ class TeamRepository(
         updateStatusByTeamId(teamId, normalized, onSuccess, onFail)
     }
 
-    /**
-     * ⚠️ 기존 호환용 (비권장)
-     * String으로 들어온 값을 enum으로 정규화 후, DB에는 enum.key로 저장
-     */
     @Deprecated("TeamStatus 버전(updateAllTeamsStatus(TeamStatus, ...))을 사용하세요.")
     fun updateAllTeamsStatus(
         newStatus: String,
@@ -124,5 +142,26 @@ class TeamRepository(
     ) {
         val normalized = TeamStatus.fromKey(newStatus)
         updateAllTeamsStatus(normalized, onSuccess, onFail)
+    }
+
+    suspend fun updateAllTeamsStatusSuspend(newStatus: TeamStatus) {
+        val qs = db.collection("teams").get().await()
+        val docs = qs.documents
+        if (docs.isEmpty()) return
+
+        docs.chunked(450).forEach { chunk ->
+            val batch = db.batch()
+            chunk.forEach { doc ->
+                batch.set(
+                    doc.reference,
+                    mapOf(
+                        "status" to newStatus.key,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    ),
+                    SetOptions.merge()
+                )
+            }
+            batch.commit().await()
+        }
     }
 }

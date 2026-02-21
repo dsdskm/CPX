@@ -1,5 +1,7 @@
+// ManagerDashboardScreen.kt
 package com.aba.cpx.ui.screens
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -11,15 +13,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.aba.cpx.R
 import com.aba.cpx.data.model.Game
 import com.aba.cpx.data.model.GameState
 import com.aba.cpx.data.model.Team
 import com.aba.cpx.data.model.TeamStatus
 import com.aba.cpx.data.repository.AdminRepository
 import com.aba.cpx.data.repository.GameRepository
+import com.aba.cpx.data.repository.GameRepository.Companion.MAX_ROUNDS
 import com.aba.cpx.data.repository.TeamRepository
 import kotlinx.coroutines.launch
 
@@ -130,7 +136,7 @@ fun ManagerDashboardScreen(
     val canReset = !isSubmitting && teams.isNotEmpty() && (gameState == GameState.COMPLETED)
 
     // --------------------------------------------
-    // ✅ WAITING 상태에서 전력배치 점수 로딩 (AdminRepository로 분리)
+    // ✅ WAITING 상태에서 전력배치 점수 로딩
     // --------------------------------------------
     LaunchedEffect(gameState, teams) {
         if (gameState != GameState.WAITING) return@LaunchedEffect
@@ -152,29 +158,64 @@ fun ManagerDashboardScreen(
     }
 
     val roundText = remember(gameState, game) {
-        if (gameState != GameState.WORKING) return@remember "-"
+        if (gameState != GameState.WORKING) return@remember ""
         val orderCount = game?.order?.size ?: 0
         val turnIndex = game?.turnIndex ?: 0
         if (orderCount <= 0) "-" else "${(turnIndex / orderCount) + 1}R"
     }
 
     val currentTeamText = remember(gameState, game, currentTeamName) {
-        if (gameState != GameState.WORKING) "-"
-        else currentTeamName ?: (game?.currentTeamId?.toString() ?: "-")
+        if (gameState != GameState.WORKING) ""
+        else currentTeamName ?: (game?.currentTeamId?.toString() ?: "")
     }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color(0xFFF0F0F0))
-    ) {
+    // ✅ 상태에 따른 팀 정렬
+    val sortedTeams = remember(teams, gameState, game, placementScores) {
+        when (gameState) {
+            GameState.COMPLETED -> {
+                teams.sortedByDescending { t ->
+                    game?.finalScoresByTeamId?.get(t.id)
+                        ?: game?.scoresByTeamId?.get(t.id)
+                        ?: 0
+                }
+            }
+            GameState.WAITING -> {
+                teams.sortedByDescending { t -> placementScores[t.id] ?: 0 }
+            }
+            else -> teams.sortedBy { it.order }
+        }
+    }
+
+    // ✅ 버튼 색상 (요구: 비활성일 때 회색)
+    val disabledBg = Color(0xFFE0E0E0)
+    val disabledFg = Color(0xFF777777)
+
+    // ✅✅ 배경 이미지 + 오버레이 + 컨텐츠
+    Box(modifier = Modifier.fillMaxSize()) {
+
+        // ✅ 배경 이미지
+        Image(
+            painter = painterResource(id = R.drawable.bg),
+            contentDescription = null,
+            modifier = Modifier.fillMaxSize(),
+            contentScale = ContentScale.Crop
+        )
+
+        // ✅ 약한 오버레이(원하면 alpha만 조절)
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.10f))
+        )
+
+        // ✅ 실제 UI
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Text(text = "운영 화면", style = MaterialTheme.typography.titleLarge)
+            Text(text = "운영 화면", style = MaterialTheme.typography.titleLarge, color = Color.White)
 
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -228,7 +269,10 @@ fun ManagerDashboardScreen(
                                 }
 
                                 Text(
-                                    text = "라운드: $roundText  ·  현재팀: $currentTeamText",
+                                    text = buildString {
+                                        append("${roundText}R (${roundText}/${MAX_ROUNDS})")
+                                        if (currentTeamText.isNotBlank()) append("  ·  현재팀: $currentTeamText")
+                                    },
                                     style = MaterialTheme.typography.titleMedium,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
@@ -262,7 +306,8 @@ fun ManagerDashboardScreen(
                     Text(
                         text = "팀이 없습니다.",
                         modifier = Modifier.fillMaxWidth(),
-                        textAlign = TextAlign.Center
+                        textAlign = TextAlign.Center,
+                        color = Color.White
                     )
                 }
 
@@ -271,18 +316,33 @@ fun ManagerDashboardScreen(
                         modifier = Modifier.weight(1f),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        items(teams.sortedBy { it.order }, key = { it.id }) { t ->
-                            val score: Int = when (gameState) {
+                        items(sortedTeams, key = { it.id }) { t ->
+                            val scoreValue: Int = when (gameState) {
                                 GameState.WAITING -> placementScores[t.id] ?: 0
+                                GameState.COMPLETED -> {
+                                    game?.finalScoresByTeamId?.get(t.id)
+                                        ?: game?.scoresByTeamId?.get(t.id)
+                                        ?: 0
+                                }
                                 else -> game?.scoresByTeamId?.get(t.id) ?: 0
                             }
 
+                            val initialScore: Int = when (gameState) {
+                                GameState.WAITING -> placementScores[t.id] ?: 0
+                                else -> game?.initialScoresByTeamId?.get(t.id) ?: 0
+                            }
+                            val damageTaken: Int = game?.damageTakenByTeamId?.get(t.id) ?: 0
+                            val bonus: Int = game?.bonusByTeamId?.get(t.id) ?: 0
+
                             TeamStatusRow(
                                 team = t,
-                                score = score,
+                                score = scoreValue,
+                                initialScore = initialScore,
+                                damageTaken = damageTaken,
+                                bonus = bonus,
                                 isCurrentTurn = ((gameState == GameState.WORKING || gameState == GameState.PAUSED) && game?.currentTeamId == t.id),
-                                onViewPlacement = { teamId, teamName, scoreOrNull ->
-                                    onViewPlacement(teamId, teamName, scoreOrNull)
+                                onViewPlacement = { teamId2, teamName2, scoreOrNull ->
+                                    onViewPlacement(teamId2, teamName2, scoreOrNull)
                                 }
                             )
                         }
@@ -293,7 +353,7 @@ fun ManagerDashboardScreen(
                                     isPlacementLoading -> Text(
                                         text = "전력배치 점수 계산중...",
                                         style = MaterialTheme.typography.bodySmall,
-                                        color = Color(0xFF666666),
+                                        color = Color.White,
                                         modifier = Modifier.padding(top = 2.dp)
                                     )
 
@@ -315,10 +375,11 @@ fun ManagerDashboardScreen(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
+                // ✅ 게임 시작: 비활성 시 회색
                 Button(
                     onClick = {
                         if (!startStateOk) {
-                            toast("게임 시작은 대기중(waiting) 상태에서만 가능합니다.")
+                            toast("게임 시작은 대기중 상태에서만 가능합니다.")
                             return@Button
                         }
                         if (!allReady) {
@@ -334,7 +395,15 @@ fun ManagerDashboardScreen(
                         }
                     },
                     enabled = startStateOk,
-                    modifier = Modifier.weight(1f).height(52.dp)
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(52.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color.White,
+                        contentColor = Color.Black,
+                        disabledContainerColor = disabledBg,
+                        disabledContentColor = disabledFg
+                    )
                 ) { Text(if (isSubmitting) "처리중..." else "게임 시작") }
 
                 OutlinedButton(
@@ -347,7 +416,7 @@ fun ManagerDashboardScreen(
                                 gameId = gameId,
                                 onSuccess = {
                                     isSubmitting = false
-                                    toast("일시중지(paused) 했습니다.")
+                                    toast("일시중지 했습니다.")
                                 },
                                 onFail = { e ->
                                     isSubmitting = false
@@ -359,7 +428,7 @@ fun ManagerDashboardScreen(
                                 gameId = gameId,
                                 onSuccess = {
                                     isSubmitting = false
-                                    toast("재개(working) 했습니다.")
+                                    toast("재개 했습니다.")
                                 },
                                 onFail = { e ->
                                     isSubmitting = false
@@ -372,16 +441,35 @@ fun ManagerDashboardScreen(
                         }
                     },
                     enabled = canTogglePauseResume,
-                    modifier = Modifier.weight(1f).height(52.dp)
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(52.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        containerColor = Color.White,
+                        contentColor = Color.Black,
+                        disabledContainerColor = disabledBg,
+                        disabledContentColor = disabledFg
+                    ),
+                    border = ButtonDefaults.outlinedButtonBorder(enabled = canTogglePauseResume)
                 ) { Text(toggleText) }
 
                 Button(
                     onClick = { showFinishConfirm = true },
                     enabled = canFinish,
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-                    modifier = Modifier.weight(1f).height(52.dp)
-                ) { Text("종료") }
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,   // 활성
+                        contentColor = Color.White,
+                        disabledContainerColor = disabledBg,
+                        disabledContentColor = disabledFg
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(52.dp)
+                ) {
+                    Text("종료")
+                }
 
+                // ✅ 초기화: 비활성 시 회색
                 OutlinedButton(
                     onClick = {
                         if (!canReset) {
@@ -391,33 +479,45 @@ fun ManagerDashboardScreen(
                         showResetConfirm = true
                     },
                     enabled = canReset,
-                    modifier = Modifier.weight(1f).height(52.dp)
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(52.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        containerColor = Color.White,
+                        contentColor = Color.Black,
+                        disabledContainerColor = disabledBg,
+                        disabledContentColor = disabledFg
+                    ),
+                    border = ButtonDefaults.outlinedButtonBorder(enabled = canReset)
                 ) { Text("초기화") }
             }
         }
 
-        // ✅ 시작 Confirm (기존 로직 유지)
+        // ✅ 시작 Confirm
         if (showStartConfirm) {
             AlertDialog(
                 onDismissRequest = { if (!isSubmitting) showStartConfirm = false },
                 title = { Text("게임 시작") },
                 text = {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("팀 order 순서대로 게임을 시작합니다.\n전력배치 점수로 초기 점수를 세팅합니다.")
+                        Text("정해진 순서대로 게임을 시작합니다.\n전력배치 점수로 초기 점수를 세팅합니다.")
                         if (!allReady) {
                             val names = notReadyTeamsPreview.joinToString(", ") { it.name }
                             Text(
                                 text = if (names.isBlank())
-                                    "⚠️ 모든 팀이 준비 완료(READY)여야 시작할 수 있습니다."
+                                    "⚠️ 모든 팀이 준비 완료여야 시작할 수 있습니다."
                                 else
-                                    "⚠️ 모든 팀이 준비 완료(READY)여야 시작할 수 있습니다.\n미준비: $names",
+                                    "⚠️ 모든 팀이 준비 완료여야 시작할 수 있습니다.\n미준비: $names",
                                 color = MaterialTheme.colorScheme.error,
                                 style = MaterialTheme.typography.bodySmall
                             )
                         }
                         if (teamsInOrderPreview.isNotEmpty()) {
                             Text("시작 순서:", style = MaterialTheme.typography.titleSmall)
-                            Text(teamsInOrderPreview.joinToString(" → ") { it.name }, style = MaterialTheme.typography.bodySmall)
+                            Text(
+                                teamsInOrderPreview.joinToString(" → ") { it.name },
+                                style = MaterialTheme.typography.bodySmall
+                            )
                         }
                     }
                 },
@@ -435,7 +535,7 @@ fun ManagerDashboardScreen(
                                 onSuccess = {
                                     isSubmitting = false
                                     showStartConfirm = false
-                                    toast("게임을 시작했습니다. (working)")
+                                    toast("게임을 시작했습니다.")
                                 },
                                 onFail = { e ->
                                     isSubmitting = false
@@ -456,7 +556,7 @@ fun ManagerDashboardScreen(
             AlertDialog(
                 onDismissRequest = { if (!isSubmitting) showFinishConfirm = false },
                 title = { Text("게임 종료") },
-                text = { Text("default_game 문서를 스냅샷으로 저장한 뒤, 게임/팀 상태를 completed로 변경합니다.\n진행할까요?") },
+                text = { Text("게임 결과를 저장한 후, 게임/팀 상태를 완료로 변경합니다.\n진행할까요?\n지난 게임 결과는 사이트에서 확인이 가능합니다.") },
                 confirmButton = {
                     Button(
                         enabled = canFinish && !isSubmitting,
@@ -491,11 +591,7 @@ fun ManagerDashboardScreen(
                 title = { Text("전체 초기화") },
                 text = {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("아래 작업을 수행합니다.")
-                        Text("1) 모든 팀 상태 → preparing")
-                        Text("2) games/default_game → waiting + 모든 필드 초기화")
-                        Text("3) games/default_game/turns → 전부 삭제")
-                        Text("4) powerPlacements → 모든 문서 초기화")
+                        Text("전체 게임 데이터와 팀 데이터를 초기화 하시겠습니까?")
                         Text("※ 되돌릴 수 없습니다.", color = MaterialTheme.colorScheme.error)
                     }
                 },
@@ -529,7 +625,9 @@ fun ManagerDashboardScreen(
 
         SnackbarHost(
             hostState = snackHostState,
-            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 16.dp)
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 16.dp)
         )
     }
 }
@@ -538,6 +636,9 @@ fun ManagerDashboardScreen(
 private fun TeamStatusRow(
     team: Team,
     score: Int,
+    initialScore: Int,
+    damageTaken: Int,
+    bonus: Int,
     isCurrentTurn: Boolean,
     onViewPlacement: (teamId: Int, teamName: String, score: Int?) -> Unit
 ) {
@@ -557,13 +658,23 @@ private fun TeamStatusRow(
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(14.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = "${team.order}번 ${team.name}  ·  ${score}점",
                     style = MaterialTheme.typography.titleMedium
+                )
+
+                Text(
+                    text = "${initialScore}(최초점수) - ${damageTaken}(피격) + ${bonus}(명중) = ${score}점",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFF666666),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
 
                 Spacer(Modifier.height(6.dp))
@@ -573,7 +684,10 @@ private fun TeamStatusRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Box(
-                        modifier = Modifier.size(10.dp).clip(CircleShape).background(statusColor)
+                        modifier = Modifier
+                            .size(10.dp)
+                            .clip(CircleShape)
+                            .background(statusColor)
                     )
                     Text(text = statusKo, style = MaterialTheme.typography.bodyMedium)
 

@@ -5,21 +5,16 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.asPaddingValues
-import androidx.compose.foundation.layout.navigationBars
-import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -27,19 +22,21 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.times
-import com.aba.cpx.data.model.ColumnHeader
+import com.aba.cpx.R
 import com.aba.cpx.data.model.Game
 import com.aba.cpx.data.model.GameState
 import com.aba.cpx.data.model.headers
 import com.aba.cpx.data.model.rows
 import com.aba.cpx.data.repository.GameRepository
+import com.aba.cpx.data.repository.GameRepository.Companion.MAX_ROUNDS
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 
@@ -53,7 +50,6 @@ fun PowerPlacementViewerScreen(
     onGoAttack: (() -> Unit)? = null,
     score: Int? = null,
 ) {
-
     val colsCount = headers.size
     val rowsCount = rows.size
 
@@ -153,10 +149,39 @@ fun PowerPlacementViewerScreen(
     }
 
     // -------------------------
-    // score calc (현재점수만 표시)
+    // ✅ 상단바(공통 규격) 계산
     // -------------------------
-    val currentScores = game?.scoresByTeamId.orEmpty()
-    val currentScore = score ?: (currentScores[teamId] ?: 0)
+    val orderList: List<Pair<Int, String>> = remember(game) {
+        game?.order.orEmpty()
+            .sortedBy { it.order }
+            .map { it.teamId to it.teamName }
+    }
+    val totalTeams = orderList.size
+    val turnIndex = game?.turnIndex ?: 0
+    val currentTeamId = game?.currentTeamId
+
+    val round = if (totalTeams <= 0) 0 else (turnIndex / totalTeams) + 1
+    val posInRound = if (totalTeams <= 0) 0 else (turnIndex % totalTeams) + 1
+    val roundShown = if (round <= 0) 0 else minOf(round, 10)
+
+    val infinite = rememberInfiniteTransition(label = "blink")
+    val blinkAlpha by infinite.animateFloat(
+        initialValue = 1f,
+        targetValue = 0.25f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 650),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "blinkAlpha"
+    )
+    val shouldBlinkCurrent = (game?.state == GameState.WORKING || game?.state == GameState.PAUSED)
+
+    // ✅ 점수식: 최초-감점+가점=현재
+    val initial = game?.initialScoresByTeamId?.get(teamId) ?: 0
+    val damageTaken = game?.damageTakenByTeamId?.get(teamId) ?: 0
+    val bonus = game?.bonusByTeamId?.get(teamId) ?: 0
+    val current = score ?: (game?.scoresByTeamId?.get(teamId) ?: 0)
+    val scoreExpr = "${initial}(최초점수) - ${damageTaken}(피격) + ${bonus}(명중) = ${current}점"
 
     // footer 계산(배치 셀 개수 기반)
     val colPoints: List<Int> = remember(headers) {
@@ -179,11 +204,24 @@ fun PowerPlacementViewerScreen(
     val density = LocalDensity.current
     fun pxToDp(px: Float): Dp = with(density) { px.toDp() }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color(0xFFF0F0F0))
-    ) {
+    Box(modifier = Modifier.fillMaxSize()) {
+
+        // ✅✅ (1) 배경 이미지: 화면 꽉 채움
+        Image(
+            painter = painterResource(id = R.drawable.bg),
+            contentDescription = null,
+            modifier = Modifier.fillMaxSize(),
+            contentScale = ContentScale.Crop // 꽉 채우기
+        )
+
+        // ✅✅ (2) 가독성 오버레이 (원하면 alpha 조절)
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.White.copy(alpha = 0.10f))
+        )
+
+        // ✅✅ (3) 실제 컨텐츠
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -195,15 +233,27 @@ fun PowerPlacementViewerScreen(
                 ),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            // ✅ 상단 한 줄: (좌)상태 + 순서칩  (우)팀/점수
-            TopInlineBar(
+            // ✅ 공통 규격 상단바 (버튼 배경 흰색 + 문구 검은색)
+            CommonTopBarPlacement(
                 game = game,
-                teamId = teamId,
-                teamName = teamName,
-                currentScore = currentScore
+                roundShown = roundShown,
+                posInRound = posInRound,
+                totalTeams = totalTeams,
+                orderList = orderList,
+                currentTeamId = currentTeamId,
+                shouldBlinkCurrent = shouldBlinkCurrent,
+                blinkAlpha = blinkAlpha,
+                rightContent = {
+                    Column(horizontalAlignment = Alignment.End) {
+                        Text(
+                            text = scoreExpr,
+                            style = MaterialTheme.typography.titleSmall,
+                            color = Color.Black // ✅ 점수 문구 검은색
+                        )
+                    }
+                }
             )
 
-            // 로딩/에러
             if (isGameLoading || isPlacementLoading) {
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
             }
@@ -274,11 +324,12 @@ fun PowerPlacementViewerScreen(
                                         val bg = typeToUnitColor(type)
 
                                         Box(
-                                            modifier = Modifier.width(cellW).height(rowH),
+                                            modifier = Modifier
+                                                .width(cellW)
+                                                .height(rowH),
                                             contentAlignment = Alignment.Center
                                         ) {
                                             TableCell("", cellW, rowH, false, background = bg, onClick = null)
-
                                             if (hitCells.contains(key)) {
                                                 Text("💥", style = MaterialTheme.typography.titleMedium)
                                             }
@@ -301,20 +352,27 @@ fun PowerPlacementViewerScreen(
     }
 }
 
-/**
- * ✅ 상단 “한 줄” 바
- * - 좌: 상태 배지 + 순서칩(스크롤) + 현재턴 깜빡임 (WORKING/PAUSED)
- * - 우: 팀명 + 점수
- */
+/* ---------------- 공통 상단바 (Placement) ---------------- */
+
 @Composable
-private fun TopInlineBar(
+private fun CommonTopBarPlacement(
     game: Game?,
-    teamId: Int,
-    teamName: String,
-    currentScore: Int,
+    roundShown: Int,
+    posInRound: Int,
+    totalTeams: Int,
+    orderList: List<Pair<Int, String>>,
+    currentTeamId: Int?,
+    shouldBlinkCurrent: Boolean,
+    blinkAlpha: Float,
+    rightContent: @Composable () -> Unit,
 ) {
     val state = game?.state ?: GameState.WAITING
-    val stateLabel = state.labelKo
+    val stateLabel = when (state) {
+        GameState.WAITING -> "대기"
+        GameState.WORKING -> "진행"
+        GameState.PAUSED -> "일시정지"
+        GameState.COMPLETED -> "종료"
+    }
     val stateColor = when (state) {
         GameState.WAITING -> Color(0xFF9E9E9E)
         GameState.WORKING -> Color(0xFF2196F3)
@@ -322,30 +380,16 @@ private fun TopInlineBar(
         GameState.COMPLETED -> Color(0xFF4CAF50)
     }
 
-    val order = remember(game) {
-        game?.order.orEmpty()
-            .sortedBy { it.order }
-            .map { it.teamId to it.teamName }
+    val currentTeamName = remember(currentTeamId, orderList) {
+        if (currentTeamId == null) "-"
+        else (orderList.firstOrNull { it.first == currentTeamId }?.second ?: currentTeamId.toString())
     }
-    val currentTeamId = game?.currentTeamId
-    val shouldBlinkCurrent = (state == GameState.WORKING || state == GameState.PAUSED)
-
-    val infinite = rememberInfiniteTransition(label = "blink")
-    val blinkAlpha by infinite.animateFloat(
-        initialValue = 1f,
-        targetValue = 0.25f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 650),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "blinkAlpha"
-    )
 
     Surface(
         modifier = Modifier
             .fillMaxWidth()
             .border(1.dp, Color(0xFFDDDDDD), RoundedCornerShape(12.dp)),
-        color = Color.White,
+        color = Color.White, // ✅ 상단바 배경 흰색
         shape = RoundedCornerShape(12.dp),
         tonalElevation = 0.dp
     ) {
@@ -355,31 +399,55 @@ private fun TopInlineBar(
                 .padding(horizontal = 12.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // ✅ 좌측 끝: 게임 상태 배지
-            Box(
-                modifier = Modifier
-                    .background(stateColor, RoundedCornerShape(999.dp))
-                    .padding(horizontal = 10.dp, vertical = 6.dp)
-            ) {
+            // ✅ 좌: 상태 · 라운드 · 현재턴팀
+            Column(modifier = Modifier.widthIn(min = 170.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .background(stateColor, RoundedCornerShape(999.dp))
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        Text(
+                            text = stateLabel,
+                            color = Color.White,
+                            style = MaterialTheme.typography.labelMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    Spacer(Modifier.width(8.dp))
+
+                    Text(
+                        text = if (totalTeams > 0) "${roundShown}R (${roundShown}/${MAX_ROUNDS})" else "",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Color.Black, // ✅ 문구 검은색
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                Spacer(Modifier.height(6.dp))
+
                 Text(
-                    text = stateLabel,
-                    color = Color.White,
-                    style = MaterialTheme.typography.labelMedium,
+                    text = "현재팀: $currentTeamName",
+                    style = MaterialTheme.typography.titleSmall,
                     maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                    overflow = TextOverflow.Ellipsis,
+                    color = Color.Black // ✅ 문구 검은색
                 )
             }
 
             Spacer(Modifier.width(10.dp))
 
-            // 좌측: 순서칩(스크롤)
+            // ✅ 중: 순서 칩
             Row(
                 modifier = Modifier
                     .weight(1f)
                     .horizontalScroll(rememberScrollState()),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                if (order.isEmpty()) {
+                if (orderList.isEmpty()) {
                     Text(
                         text = "순서: -",
                         style = MaterialTheme.typography.bodySmall,
@@ -388,9 +456,9 @@ private fun TopInlineBar(
                         overflow = TextOverflow.Ellipsis
                     )
                 } else {
-                    order.forEachIndexed { idx, (tid, tname) ->
-                        val isCurrent = shouldBlinkCurrent && currentTeamId != null && tid == currentTeamId
-
+                    orderList.forEachIndexed { idx, (tid, tname) ->
+                        val isCurrent =
+                            (shouldBlinkCurrent && currentTeamId != null && tid == currentTeamId)
                         val chipBg = if (isCurrent) Color(0xFF7C4DFF) else Color(0xFFEFEFEF)
                         val chipFg = if (isCurrent) Color.White else Color(0xFF222222)
 
@@ -423,7 +491,7 @@ private fun TopInlineBar(
                             }
                         }
 
-                        if (idx != order.lastIndex) {
+                        if (idx != orderList.lastIndex) {
                             Text(
                                 text = "→",
                                 style = MaterialTheme.typography.bodySmall,
@@ -437,25 +505,16 @@ private fun TopInlineBar(
 
             Spacer(Modifier.width(10.dp))
 
-            // 우측: 팀/점수
-            Column(horizontalAlignment = Alignment.End) {
-                Text(
-                    text = "팀 #$teamId",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = Color(0xFF666666),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    text = "${teamName} · ${currentScore}점",
-                    style = MaterialTheme.typography.titleSmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
+            // ✅ 우: 화면별 커스텀(점수식 등)
+            Box(
+                modifier = Modifier.widthIn(min = 190.dp),
+                contentAlignment = Alignment.CenterEnd
+            ) { rightContent() }
         }
     }
 }
+
+/* ---------------- 기존 Viewer helpers ---------------- */
 
 private fun typeToUnitColor(type: String?): Color {
     if (type.isNullOrBlank()) return Color.White
@@ -493,7 +552,8 @@ private fun TableCell(
             text = text,
             textAlign = TextAlign.Center,
             style = MaterialTheme.typography.bodySmall,
-            maxLines = 2
+            maxLines = 2,
+            color = Color.Black
         )
     }
 }

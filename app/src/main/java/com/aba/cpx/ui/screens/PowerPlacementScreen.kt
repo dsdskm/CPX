@@ -2,6 +2,7 @@ package com.aba.cpx.ui.screens
 
 import android.annotation.SuppressLint
 import android.util.Log
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -15,6 +16,8 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHost
@@ -25,13 +28,15 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.times
+import com.aba.cpx.R
 import com.aba.cpx.data.model.CellDto
-import com.aba.cpx.data.model.ColumnHeader
 import com.aba.cpx.data.model.PlacementDto
 import com.aba.cpx.data.model.PowerPlacement
 import com.aba.cpx.data.model.TeamStatus
@@ -63,7 +68,6 @@ fun PowerPlacementScreen(
     status: String,
     onMoveToWaiting: () -> Unit
 ) {
-
     val colsCount = headers.size
     val rowsCount = rows.size
 
@@ -84,7 +88,8 @@ fun PowerPlacementScreen(
     }
 
     val statusKo = remember(status) { TeamStatus.fromKey(status).labelKo }
-    Log.d("KKH","PowerPlacementScreen statusKo ${statusKo}")
+    Log.d("KKH", "PowerPlacementScreen statusKo $statusKo")
+
     // ✅ 점수 파싱
     val colPoints: List<Int> = remember(headers) {
         headers.map { h -> h.scoreText.filter { it.isDigit() }.toIntOrNull() ?: 0 }
@@ -302,11 +307,25 @@ fun PowerPlacementScreen(
         )
     }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color(0xFFF0F0F0))
-    ) {
+    // ✅ 배경 이미지 + 오버레이 + 컨텐츠
+    Box(modifier = Modifier.fillMaxSize()) {
+
+        // ✅ 1) 배경
+        Image(
+            painter = painterResource(id = R.drawable.bg),
+            contentDescription = null,
+            modifier = Modifier.fillMaxSize(),
+            contentScale = ContentScale.Crop
+        )
+
+        // ✅ 2) 가독성 오버레이(원하면 alpha 조절/삭제 가능)
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.20f))
+        )
+
+        // ✅ 3) 기존 UI (카드 느낌으로 띄우고 싶으면 Card로 한번 감싸도 됨)
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -319,124 +338,145 @@ fun PowerPlacementScreen(
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             // ✅ 상단 줄: 왼쪽(팀/상태) + 가운데(배치점수 합계) + 오른쪽(유닛 선택) + (준비 완료 버튼)
-            Row(
+            Card(
                 modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
+                colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.92f)),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
             ) {
-                // 왼쪽: 팀/상태
-                Text(
-                    text = "$teamName - $statusKo",
-                    style = MaterialTheme.typography.titleMedium,
-                    textAlign = TextAlign.Start,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
-
-                // 가운데: 점수
-                Box(
-                    modifier = Modifier.weight(1f),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "${totalScore}점",
-                        style = MaterialTheme.typography.titleMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-
-                // 오른쪽: 유닛선택 + 준비완료
                 Row(
-                    modifier = Modifier.weight(1.4f),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
-                        modifier = Modifier
-                            .weight(1f)
-                            .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                    // 왼쪽: 팀/상태
+                    Text(
+                        text = "$teamName - $statusKo",
+                        style = MaterialTheme.typography.titleMedium,
+                        textAlign = TextAlign.Start,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+
+                    // 가운데: 점수
+                    Box(
+                        modifier = Modifier.weight(1f),
+                        contentAlignment = Alignment.Center
                     ) {
-                        shapes.forEach { def ->
-                            val isSelected = def.type == selected.type
-                            val enabled = canPlaceNow(def) && !isLocked && !isRestoring && !isSubmitting
-
-                            val countText = when (def.type) {
-                                UnitType.TANK -> "${placedTank}/${maxTank}"
-                                UnitType.INFANTRY -> "${placedInfantry}/${maxInfantry}"
-                                UnitType.CANNON1, UnitType.CANNON2, UnitType.CANNON3 ->
-                                    "${placedCannon}/${maxCannonTotal}"
-                            }
-
-                            UnitSelectButton(
-                                label = def.label,
-                                countText = countText,
-                                isSelected = isSelected,
-                                enabled = enabled,
-                                color = unitColor(def.type),
-                                blocks = def.blocks,
-                                onClick = {
-                                    if (isLocked) showToast("준비 완료 이후에는 전력을 재배치할 수 없습니다.")
-                                    else selected = def
-                                }
-                            )
-                        }
+                        Text(
+                            text = "${totalScore}점",
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
 
-                    Spacer(Modifier.width(8.dp))
-
-                    Button(
-                        onClick = { showConfirmDialog = true },
-                        enabled = isAllPlaced && !isLocked && !isRestoring && !isSubmitting
+                    // 오른쪽: 유닛선택 + 준비완료
+                    Row(
+                        modifier = Modifier.weight(1.4f),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(if (isSubmitting) "저장중..." else "준비 완료")
+                        Row(
+                            modifier = Modifier
+                                .weight(1f)
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            shapes.forEach { def ->
+                                val isSelected = def.type == selected.type
+                                val enabled = canPlaceNow(def) && !isLocked && !isRestoring && !isSubmitting
+
+                                val countText = when (def.type) {
+                                    UnitType.TANK -> "${placedTank}/${maxTank}"
+                                    UnitType.INFANTRY -> "${placedInfantry}/${maxInfantry}"
+                                    UnitType.CANNON1, UnitType.CANNON2, UnitType.CANNON3 ->
+                                        "${placedCannon}/${maxCannonTotal}"
+                                }
+
+                                UnitSelectButton(
+                                    label = def.label,
+                                    countText = countText,
+                                    isSelected = isSelected,
+                                    enabled = enabled,
+                                    color = unitColor(def.type),
+                                    blocks = def.blocks,
+                                    onClick = {
+                                        if (isLocked) showToast("준비 완료 이후에는 전력을 재배치할 수 없습니다.")
+                                        else selected = def
+                                    }
+                                )
+                            }
+                        }
+
+                        Spacer(Modifier.width(8.dp))
+
+                        Button(
+                            onClick = { showConfirmDialog = true },
+                            enabled = isAllPlaced && !isLocked && !isRestoring && !isSubmitting
+                        ) {
+                            Text(if (isSubmitting) "저장중..." else "준비 완료")
+                        }
                     }
                 }
             }
 
             // ✅ 로딩/에러 표시
             if (isRestoring) {
-                Row(
+                Card(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.Center,
-                    verticalAlignment = Alignment.CenterVertically
+                    colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.92f))
                 ) {
-                    CircularProgressIndicator()
-                    Spacer(Modifier.width(10.dp))
-                    Text("배치 불러오는 중...")
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CircularProgressIndicator()
+                        Spacer(Modifier.width(10.dp))
+                        Text("배치 불러오는 중...")
+                    }
                 }
             }
             if (!isRestoring && restoreError != null) {
-                Text(
-                    text = restoreError!!,
-                    color = Color.Red,
+                Card(
                     modifier = Modifier.fillMaxWidth(),
-                    textAlign = TextAlign.Center
-                )
+                    colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.92f))
+                ) {
+                    Text(
+                        text = restoreError!!,
+                        color = Color.Red,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        textAlign = TextAlign.Center
+                    )
+                }
             }
 
-            // ✅ 그리드를 "남는 높이"만큼 최대한 채우도록 동적 셀 사이즈 계산
-            Box(
+            // ✅ 그리드
+            Card(
                 modifier = Modifier
                     .weight(1f)
-                    .fillMaxWidth()
+                    .fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.92f)),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
             ) {
                 BoxWithConstraints(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(Color.White)
                         .border(1.dp, Color(0xFF999999))
                         .padding(8.dp)
                 ) {
                     val gridW = maxWidth
                     val gridH = maxHeight
 
-                    // 왼쪽 라벨 컬럼 폭
                     val leftColW = (gridW * 0.18f).coerceIn(76.dp, 110.dp)
                     val cellW = ((gridW - leftColW) / colsCount).coerceIn(62.dp, 110.dp)
 
-                    // 헤더/푸터/본문 높이
                     val headerH = (gridH * 0.12f).coerceIn(44.dp, 64.dp)
                     val footerH = (gridH * 0.10f).coerceIn(40.dp, 56.dp)
                     val bodyH = (gridH - headerH - footerH).coerceAtLeast(0.dp)

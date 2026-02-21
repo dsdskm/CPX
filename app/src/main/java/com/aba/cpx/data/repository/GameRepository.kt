@@ -5,16 +5,17 @@ import com.aba.cpx.data.model.Game
 import com.aba.cpx.data.model.GameOrderItem
 import com.aba.cpx.data.model.GameState
 import com.aba.cpx.data.model.Team
+import com.aba.cpx.data.model.TeamStatus
 import com.google.android.gms.tasks.Task
 import com.google.android.gms.tasks.Tasks
 import com.google.firebase.Timestamp
-import com.google.firebase.firestore.DocumentReference
+import com.google.firebase.firestore.CollectionReference
 import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
-import com.google.firebase.firestore.QuerySnapshot
 import com.google.firebase.firestore.SetOptions
+import kotlinx.coroutines.tasks.await
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -22,18 +23,12 @@ import java.util.UUID
 import kotlin.math.max
 
 class GameRepository(
-    private val db: FirebaseFirestore = FirebaseFirestore.getInstance()
+    private val db: FirebaseFirestore = FirebaseFirestore.getInstance(),
+    private val powerPlacementRepo: PowerPlacementRepository = PowerPlacementRepository(db),
+    private val teamRepo: TeamRepository = TeamRepository(db),
 ) {
     companion object {
-        private const val MAX_ROUNDS = 10
-        private val COL_POINTS = listOf(10, 10, 8, 8, 6, 6, 4, 4, 2, 2)
-
-        private val PLACEMENTS_COL_CANDIDATES = listOf(
-            "powerPlacements",
-            "powerPlacement",
-            "power_placements"
-        )
-        private const val CANONICAL_PLACEMENTS_COL = "powerPlacements"
+        const val MAX_ROUNDS = 10
     }
 
     private fun gameRef(gameId: String) =
@@ -48,11 +43,9 @@ class GameRepository(
     private fun parseGameState(stateStr: String?): GameState {
         if (stateStr.isNullOrBlank()) return GameState.WAITING
 
-        // 1) 신버전 키 매칭
         val normalized = stateStr.trim().lowercase()
         GameState.entries.firstOrNull { it.key == normalized }?.let { return it }
 
-        // 2) 구버전 대문자/enum name 매핑 (DB 마이그레이션 없이)
         return when (stateStr.trim().uppercase()) {
             "READY" -> GameState.WAITING
             "RUNNING" -> GameState.WORKING
@@ -136,70 +129,110 @@ class GameRepository(
         return out
     }
 
-    // -------------------------------
-    // ✅ 전력배치 점수 계산 (시작점수)
-    // -------------------------------
-    private fun computePlacementScoreFromSnapshot(doc: DocumentSnapshot?): Int {
-        if (doc == null || !doc.exists()) return 0
-
-        val placements = doc.get("placements") as? List<*> ?: return 0
-        var sum = 0
-
-        placements.forEach { pAny ->
-            val p = pAny as? Map<*, *> ?: return@forEach
-            val cells = p["cells"] as? List<*> ?: return@forEach
-
-            cells.forEach { cAny ->
-                val cm = cAny as? Map<*, *> ?: return@forEach
-                val c = (cm["c"] as? Number)?.toInt() ?: return@forEach
-                if (c in COL_POINTS.indices) sum += COL_POINTS[c]
-            }
+    // ✅ 현재점수 = initial - damageTaken + bonus 로 강제 재계산
+    private fun recomputeScores(
+        initial: Map<Int, Int>,
+        damageTaken: Map<Int, Int>,
+        bonus: Map<Int, Int>,
+    ): Map<Int, Int> {
+        val teamIds = (initial.keys + damageTaken.keys + bonus.keys).toSet()
+        val out = mutableMapOf<Int, Int>()
+        for (tid in teamIds) {
+            val init = initial[tid] ?: 0
+            val dmg = damageTaken[tid] ?: 0
+            val bon = bonus[tid] ?: 0
+            out[tid] = max(init - dmg + bon, 0)
         }
-        return sum
+        return out
     }
 
-    // -------------------------------
-    // ✅ 전력배치 문서 찾기
-    // -------------------------------
-    private fun fetchPlacementSnapshot(teamId: Int): Task<DocumentSnapshot?> {
-        fun tryOneCollection(colName: String): Task<DocumentSnapshot?> {
-            val directRef = db.collection(colName).document(teamId.toString())
-            return directRef.get().continueWithTask { t ->
-                val snap = t.result
-                if (snap != null && snap.exists()) {
-                    Tasks.forResult(snap)
-                } else {
-                    db.collection(colName)
-                        .whereEqualTo("teamId", teamId)
-                        .limit(1)
-                        .get()
-                        .continueWith { qsTask ->
-                            val qs: QuerySnapshot? = qsTask.result
-                            qs?.documents?.firstOrNull()
-                        }
-                }
-            }
-        }
+    // ------------------------------------------------------------
+    // ✅ (운영) 게임 종료 + 아카이브
+    // - games/{gameId} 내용을 games/{archiveId}로 복사
+    // - live 게임 COMPLETED 처리
+    // ------------------------------------------------------------
+    suspend fun finishGameAndArchive(gameId: String): String {
+        val liveRef = gameRef(gameId)
 
-        var chain: Task<DocumentSnapshot?> = Tasks.forResult(null)
-        PLACEMENTS_COL_CANDIDATES.forEach { col ->
-            chain = chain.continueWithTask { prev ->
-                val prevSnap = prev.result
-                if (prevSnap != null && prevSnap.exists()) {
-                    Tasks.forResult(prevSnap)
-                } else {
-                    tryOneCollection(col)
-                }
+        val fmt = SimpleDateFormat("yyyyMMddHHmmssSSS", Locale.KOREA)
+        val archiveId = fmt.format(Date())
+        val archiveRef = gameRef(archiveId)
+
+        db.runTransaction { tx ->
+            val liveSnap = tx.get(liveRef)
+            if (!liveSnap.exists()) throw IllegalStateException("games/$gameId 문서가 없습니다.")
+
+            val liveData = liveSnap.data ?: emptyMap<String, Any?>()
+            val archiveData = HashMap<String, Any?>().apply {
+                putAll(liveData)
+                put("state", GameState.COMPLETED.key)
+                put("sourceLiveGameId", gameId)
+                put("currentTeamId", null)
+                put("turnToken", null)
+                put("archivedAt", FieldValue.serverTimestamp())
             }
-        }
-        return chain
+
+            tx.set(archiveRef, archiveData, SetOptions.merge())
+
+            tx.set(
+                liveRef,
+                mapOf(
+                    "state" to GameState.COMPLETED.key,
+                    "endedAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp(),
+                    "currentTeamId" to null,
+                    "turnToken" to null,
+                ),
+                SetOptions.merge()
+            )
+
+            null
+        }.await()
+
+        return archiveId
     }
 
-    // ✅ submitTurn/수동입력에서 query 못하므로 ref를 미리 확정
-    private fun resolvePlacementRef(teamId: Int): Task<DocumentReference> {
-        return fetchPlacementSnapshot(teamId).continueWith { t ->
-            val snap = t.result
-            snap?.reference ?: db.collection(CANONICAL_PLACEMENTS_COL).document(teamId.toString())
+    // ------------------------------------------------------------
+    // ✅ (운영) 라이브 게임 초기화 + turns 삭제
+    // ------------------------------------------------------------
+    suspend fun resetLiveGame(gameId: String) {
+        val liveRef = gameRef(gameId)
+
+        liveRef.set(
+            mapOf(
+                "state" to GameState.WAITING.key,
+                "order" to emptyList<Map<String, Any>>(),
+                "turnIndex" to 0,
+                "currentTeamId" to null,
+                "turnToken" to null,
+                "lastAttackedTeamId" to null,
+
+                "scoresByTeamId" to emptyMap<String, Int>(),
+                "initialScoresByTeamId" to emptyMap<String, Int>(),
+                "finalScoresByTeamId" to emptyMap<String, Int>(),
+                "damageTakenByTeamId" to emptyMap<String, Int>(),
+                "bonusByTeamId" to emptyMap<String, Int>(),
+                "attackedTargetsByTeamId" to emptyMap<String, List<Int>>(),
+                "lastTargetByTeamId" to emptyMap<String, Int>(),
+
+                "startedAt" to null,
+                "endedAt" to null,
+                "updatedAt" to FieldValue.serverTimestamp(),
+            ),
+            SetOptions.merge()
+        ).await()
+
+        deleteAllDocumentsInSubCollection(turnsCol(gameId))
+    }
+
+    private suspend fun deleteAllDocumentsInSubCollection(col: CollectionReference) {
+        while (true) {
+            val snap = col.limit(450).get().await()
+            if (snap.isEmpty) break
+
+            val batch = db.batch()
+            snap.documents.forEach { d -> batch.delete(d.reference) }
+            batch.commit().await()
         }
     }
 
@@ -220,19 +253,22 @@ class GameRepository(
                 }
 
                 val data = hashMapOf<String, Any?>(
-                    // ✅ state는 DB에 key로 저장
                     "state" to GameState.WAITING.key,
                     "order" to emptyList<Map<String, Any>>(),
                     "turnIndex" to 0,
                     "currentTeamId" to null,
                     "turnToken" to null,
                     "lastAttackedTeamId" to null,
+
                     "scoresByTeamId" to emptyMap<String, Int>(),
-                    // ✅ 추가: 원점수(시작점수)
                     "initialScoresByTeamId" to emptyMap<String, Int>(),
-                    // ✅ 공격기록
+                    "finalScoresByTeamId" to emptyMap<String, Int>(),
+                    "damageTakenByTeamId" to emptyMap<String, Int>(),
+                    "bonusByTeamId" to emptyMap<String, Int>(),
+
                     "attackedTargetsByTeamId" to emptyMap<String, List<Int>>(),
                     "lastTargetByTeamId" to emptyMap<String, Int>(),
+
                     "startedAt" to null,
                     "endedAt" to null,
                     "updatedAt" to FieldValue.serverTimestamp(),
@@ -281,11 +317,17 @@ class GameRepository(
                             )
                         }
 
-                    val scores = parseScoresMap(snap.get("scoresByTeamId"))
                     val initialScores = parseScoresMap(snap.get("initialScoresByTeamId"))
+                    val finalScores = parseScoresMap(snap.get("finalScoresByTeamId"))
+                    val damageTaken = parseScoresMap(snap.get("damageTakenByTeamId"))
+                    val bonus = parseScoresMap(snap.get("bonusByTeamId"))
 
-                    val attackedTargetsByTeamId =
-                        parseIntListMap(snap.get("attackedTargetsByTeamId"))
+                    val storedScores = parseScoresMap(snap.get("scoresByTeamId"))
+                    val recomputed = recomputeScores(initialScores, damageTaken, bonus)
+                    val scores =
+                        if (storedScores.isEmpty() && recomputed.isNotEmpty()) recomputed else storedScores
+
+                    val attackedTargetsByTeamId = parseIntListMap(snap.get("attackedTargetsByTeamId"))
                     val lastTargetByTeamId = parseIntMap(snap.get("lastTargetByTeamId"))
 
                     val game = Game(
@@ -299,8 +341,12 @@ class GameRepository(
                         startedAt = snap.getTimestamp("startedAt")?.toDate()?.time,
                         endedAt = snap.getTimestamp("endedAt")?.toDate()?.time,
                         updatedAt = snap.getTimestamp("updatedAt")?.toDate()?.time,
+
                         scoresByTeamId = scores,
                         initialScoresByTeamId = initialScores,
+                        finalScoresByTeamId = finalScores,
+                        damageTakenByTeamId = damageTaken,
+                        bonusByTeamId = bonus,
                         attackedTargetsByTeamId = attackedTargetsByTeamId,
                         lastTargetByTeamId = lastTargetByTeamId
                     )
@@ -336,19 +382,21 @@ class GameRepository(
             )
         }
 
-        val tasks: List<Task<DocumentSnapshot?>> = sorted.map { t -> fetchPlacementSnapshot(t.id) }
+        val tasks: List<Task<DocumentSnapshot?>> =
+            sorted.map { t -> powerPlacementRepo.fetchPlacementSnapshot(t.id) }
+
         Log.d("kkh", "tasks ${tasks.size}")
 
         Tasks.whenAllSuccess<DocumentSnapshot?>(tasks)
             .addOnSuccessListener { snaps ->
-                val scoreByTeam = mutableMapOf<Int, Int>()
+                val initialByTeam = mutableMapOf<Int, Int>()
                 sorted.forEachIndexed { idx, team ->
                     val doc = snaps.getOrNull(idx)
-                    val initialScore = computePlacementScoreFromSnapshot(doc)
-                    scoreByTeam[team.id] = initialScore
+                    val initialScore = powerPlacementRepo.computePlacementScoreFromSnapshot(doc)
+                    initialByTeam[team.id] = initialScore
                 }
 
-                val scoresInitFs = toFirestoreScoresMap(scoreByTeam)
+                val initialFs = toFirestoreScoresMap(initialByTeam)
 
                 db.runTransaction { tx ->
                     val snap = tx.get(ref)
@@ -356,7 +404,6 @@ class GameRepository(
                     val currentStateStr = snap.getString("state")
                     val currentState = parseGameState(currentStateStr)
 
-                    // ✅ working/paused이면 진행중 취급
                     if (snap.exists() && (currentState == GameState.WORKING || currentState == GameState.PAUSED)) {
                         throw IllegalStateException("이미 게임이 진행중입니다. (state=${currentState.key})")
                     }
@@ -372,8 +419,14 @@ class GameRepository(
                             "currentTeamId" to firstTeamId,
                             "turnToken" to UUID.randomUUID().toString(),
                             "lastAttackedTeamId" to null,
-                            "scoresByTeamId" to scoresInitFs,
-                            "initialScoresByTeamId" to scoresInitFs,
+
+                            "initialScoresByTeamId" to initialFs,
+                            "damageTakenByTeamId" to emptyMap<String, Int>(),
+                            "bonusByTeamId" to emptyMap<String, Int>(),
+
+                            "scoresByTeamId" to initialFs,
+                            "finalScoresByTeamId" to emptyMap<String, Int>(),
+
                             "attackedTargetsByTeamId" to emptyMap<String, List<Int>>(),
                             "lastTargetByTeamId" to emptyMap<String, Int>(),
                             "startedAt" to FieldValue.serverTimestamp(),
@@ -384,7 +437,14 @@ class GameRepository(
                     )
                     null
                 }
-                    .addOnSuccessListener { onSuccess() }
+                    .addOnSuccessListener {
+                        // ✅ teams 상태 변경은 TeamRepository로 위임
+                        teamRepo.updateAllTeamsStatus(
+                            TeamStatus.WORKING,
+                            onSuccess = onSuccess,
+                            onFail = onFail
+                        )
+                    }
                     .addOnFailureListener { e -> onFail(e as? Exception ?: Exception(e)) }
             }
             .addOnFailureListener { e ->
@@ -441,7 +501,7 @@ class GameRepository(
 
         val gRef = gameRef(gameId)
 
-        resolvePlacementRef(targetTeamId)
+        powerPlacementRepo.resolvePlacementRef(targetTeamId)
             .addOnSuccessListener { placementRef ->
                 db.runTransaction { tx ->
                     val gSnap = tx.get(gRef)
@@ -499,6 +559,7 @@ class GameRepository(
 
                     val newHitMaps = mutableListOf<Map<String, Any?>>()
                     var damage = 0
+                    var hitCount = 0
 
                     picks.forEach { (c, r) ->
                         val key = "$c:$r"
@@ -516,17 +577,33 @@ class GameRepository(
                             )
                         }
 
-                        // 점수차감: 배치에 존재 + 아직 처음 맞음
+                        // ✅ 명중 정의: 배치에 존재 + 아직 처음 맞음
                         if (onPlacement && !alreadyHit) {
-                            if (c in COL_POINTS.indices) damage += COL_POINTS[c]
+                            hitCount += 1
+                            damage += powerPlacementRepo.pointsForCol(c)
                         }
                     }
 
-                    // ✅ 점수 반영 (타겟 차감)
-                    val scores = parseScoresMap(gSnap.get("scoresByTeamId")).toMutableMap()
-                    val prevTargetScore = scores[targetTeamId] ?: 0
-                    val nextTargetScore = max(prevTargetScore - damage, 0)
-                    scores[targetTeamId] = nextTargetScore
+                    // ✅ 가점: 1발당 +3, 3발 모두 명중이면 +3 추가 => 최대 12
+                    val bonusGain = (hitCount * 3) + (if (hitCount == 3) 3 else 0)
+
+                    // ✅ 누적 맵 로드
+                    val initial = parseScoresMap(gSnap.get("initialScoresByTeamId"))
+                    val damageTaken = parseScoresMap(gSnap.get("damageTakenByTeamId")).toMutableMap()
+                    val bonus = parseScoresMap(gSnap.get("bonusByTeamId")).toMutableMap()
+
+                    // ✅ 타겟 감점 누적
+                    if (damage > 0) {
+                        damageTaken[targetTeamId] = (damageTaken[targetTeamId] ?: 0) + damage
+                    }
+
+                    // ✅ 공격자 가점 누적
+                    if (bonusGain > 0) {
+                        bonus[teamId] = (bonus[teamId] ?: 0) + bonusGain
+                    }
+
+                    // ✅ 현재점수 재계산
+                    val scores = recomputeScores(initial, damageTaken, bonus)
 
                     // ✅ 턴 진행
                     val orderList = (gSnap.get("order") as? List<Map<String, Any>>).orEmpty()
@@ -539,23 +616,24 @@ class GameRepository(
                     val updatesGame = mutableMapOf<String, Any?>(
                         "lastAttackedTeamId" to targetTeamId,
                         "updatedAt" to FieldValue.serverTimestamp(),
+
+                        "damageTakenByTeamId" to toFirestoreScoresMap(damageTaken),
+                        "bonusByTeamId" to toFirestoreScoresMap(bonus),
                         "scoresByTeamId" to toFirestoreScoresMap(scores),
 
-                        // ✅ 공격 기록 유지 (팀별)
                         "lastTargetByTeamId.${teamId}" to targetTeamId,
                         "attackedTargetsByTeamId.${teamId}" to FieldValue.arrayUnion(targetTeamId),
                     )
 
-                    // ✅ 마지막 턴이 끝났으면 "즉시 종료" (11R로 넘어가는 상태를 만들지 않음)
-                    if (nextIndex >= maxTurns) {
+                    val isLastTurn = (nextIndex >= maxTurns)
+
+                    if (isLastTurn) {
                         updatesGame["state"] = GameState.COMPLETED.key
-
-                        // ✅ 핵심: turnIndex를 maxTurns로 올리지 않고, 마지막 유효 턴(maxTurns-1)에 고정
                         updatesGame["turnIndex"] = (maxTurns - 1).coerceAtLeast(0)
-
                         updatesGame["currentTeamId"] = null
                         updatesGame["turnToken"] = null
                         updatesGame["endedAt"] = FieldValue.serverTimestamp()
+                        updatesGame["finalScoresByTeamId"] = toFirestoreScoresMap(scores)
                     } else {
                         val nextTeamId =
                             (orderList[nextIndex % teamCount]["teamId"] as? Number)?.toInt()
@@ -567,6 +645,12 @@ class GameRepository(
                     }
 
                     tx.update(gRef, updatesGame)
+
+                    // ✅ 마지막 턴이면 teams 상태도 completed (TeamRepository로 위임, tx 내 처리)
+                    if (isLastTurn) {
+                        val teamIdsInOrder = orderList.mapNotNull { (it["teamId"] as? Number)?.toInt() }
+                        teamRepo.setTeamsStatusInTx(tx, teamIdsInOrder, TeamStatus.COMPLETED)
+                    }
 
                     // ✅ 타겟 placement에 hitCells 저장
                     if (newHitMaps.isNotEmpty()) {
@@ -593,8 +677,9 @@ class GameRepository(
                         }
                     }
 
-                    // ✅ 턴 로그
-                    val turnLogRef = turnsCol(gameId).document()
+                    val fmt = SimpleDateFormat("yyyyMMddHHmmssSSS", Locale.KOREA)
+                    val tsId = fmt.format(Date()) // 클라 시간
+                    val turnLogRef = turnsCol(gameId).document(tsId)
                     tx.set(
                         turnLogRef,
                         mapOf(
@@ -603,6 +688,8 @@ class GameRepository(
                             "targetTeamId" to targetTeamId,
                             "cells" to picks.map { (c, r) -> mapOf("c" to c, "r" to r) },
                             "damage" to damage,
+                            "hitCount" to hitCount,
+                            "bonusGain" to bonusGain,
                             "createdAt" to FieldValue.serverTimestamp(),
                             "turnIndex" to turnIndex
                         ),
@@ -617,47 +704,6 @@ class GameRepository(
             .addOnFailureListener { e ->
                 onFail(e as? Exception ?: Exception(e))
             }
-    }
-
-    // -------------------------------
-    // ✅ 수동 피격 입력 (턴/점수/턴인덱스 건드리지 않음)
-    // -------------------------------
-    fun addHitManual(
-        targetTeamId: Int,
-        cells: List<Pair<Int, Int>>,
-        attackerTeamId: Int? = null,
-        onSuccess: () -> Unit,
-        onFail: (Exception) -> Unit
-    ) {
-        if (cells.isEmpty()) {
-            onFail(IllegalArgumentException("cells empty"))
-            return
-        }
-
-        resolvePlacementRef(targetTeamId)
-            .addOnSuccessListener { placementRef ->
-                val at = Timestamp.now()
-                val hitMaps = cells.distinct().map { (c, r) ->
-                    mutableMapOf<String, Any?>(
-                        "c" to c,
-                        "r" to r,
-                        "at" to at
-                    ).apply {
-                        if (attackerTeamId != null) put("attackerTeamId", attackerTeamId)
-                    }
-                }
-
-                placementRef.set(
-                    mapOf(
-                        "teamId" to targetTeamId,
-                        "updatedAt" to FieldValue.serverTimestamp(),
-                        "hitCells" to FieldValue.arrayUnion(*hitMaps.toTypedArray())
-                    ),
-                    SetOptions.merge()
-                ).addOnSuccessListener { onSuccess() }
-                    .addOnFailureListener { e -> onFail(e as? Exception ?: Exception(e)) }
-            }
-            .addOnFailureListener { e -> onFail(e as? Exception ?: Exception(e)) }
     }
 
     private fun setState(
@@ -688,86 +734,6 @@ class GameRepository(
             )
             null
         }.addOnSuccessListener { onSuccess() }
-            .addOnFailureListener { e -> onFail(e as? Exception ?: Exception(e)) }
-    }
-
-    // -------------------------------
-    // ✅ hitCells 구독 (팀별)
-    // -------------------------------
-    fun listenHitCellsForTeam(
-        teamId: Int,
-        onUpdate: (Set<Pair<Int, Int>>) -> Unit,
-        onError: (Exception) -> Unit
-    ): ListenerRegistration {
-        val ref = db.collection(CANONICAL_PLACEMENTS_COL).document(teamId.toString())
-        return ref.addSnapshotListener { snap, err ->
-            if (err != null) {
-                onError(err)
-                return@addSnapshotListener
-            }
-            if (snap == null || !snap.exists()) {
-                onUpdate(emptySet())
-                return@addSnapshotListener
-            }
-
-            try {
-                val hits = (snap.get("hitCells") as? List<*>) ?: emptyList<Any?>()
-                val set = hits.mapNotNull { hAny ->
-                    val hm = hAny as? Map<*, *> ?: return@mapNotNull null
-                    val c = (hm["c"] as? Number)?.toInt() ?: return@mapNotNull null
-                    val r = (hm["r"] as? Number)?.toInt() ?: return@mapNotNull null
-                    c to r
-                }.toSet()
-                onUpdate(set)
-            } catch (e: Exception) {
-                onError(e)
-            }
-        }
-    }
-
-    // (기존 호환용 alias)
-    fun listenHitCells(
-        teamId: Int,
-        onUpdate: (Set<Pair<Int, Int>>) -> Unit,
-        onError: (Exception) -> Unit
-    ): ListenerRegistration = listenHitCellsForTeam(teamId, onUpdate, onError)
-
-    // -------------------------------
-    // ✅ hitCells 수동 추가 (canonical powerPlacements/{teamId})
-    // -------------------------------
-    fun addHitCellsManualForTeam(
-        teamId: Int,
-        cells: List<Pair<Int, Int>>,
-        attackerTeamId: Int? = null,
-        onSuccess: () -> Unit,
-        onFail: (Exception) -> Unit
-    ) {
-        if (cells.isEmpty()) {
-            onFail(IllegalArgumentException("cells empty"))
-            return
-        }
-
-        val ref = db.collection(CANONICAL_PLACEMENTS_COL).document(teamId.toString())
-        val at = Timestamp.now()
-
-        val hitMaps = cells.distinct().map { (c, r) ->
-            mutableMapOf<String, Any?>(
-                "c" to c,
-                "r" to r,
-                "at" to at
-            ).apply {
-                if (attackerTeamId != null) put("attackerTeamId", attackerTeamId)
-            }
-        }
-
-        ref.set(
-            mapOf(
-                "teamId" to teamId,
-                "updatedAt" to FieldValue.serverTimestamp(),
-                "hitCells" to FieldValue.arrayUnion(*hitMaps.toTypedArray())
-            ),
-            SetOptions.merge()
-        ).addOnSuccessListener { onSuccess() }
             .addOnFailureListener { e -> onFail(e as? Exception ?: Exception(e)) }
     }
 }

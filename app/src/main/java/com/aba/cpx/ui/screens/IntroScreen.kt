@@ -1,6 +1,8 @@
 package com.aba.cpx.ui.screens
 
 import androidx.compose.animation.core.*
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -12,13 +14,18 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.aba.cpx.R
 
 @Composable
 fun IntroScreen(onStartClick: () -> Unit) {
-    // "START" 텍스트의 깜빡이는 애니메이션을 위한 alpha 값
+
+    // START 텍스트 깜빡임
     val infiniteTransition = rememberInfiniteTransition(label = "BlinkingStart")
     val alpha by infiniteTransition.animateFloat(
         initialValue = 0.2f,
@@ -30,28 +37,44 @@ fun IntroScreen(onStartClick: () -> Unit) {
         label = "StartAlpha"
     )
 
-    Box(
-        modifier = Modifier.fillMaxSize(),
-        contentAlignment = Alignment.Center
-    ) {
-        // 1. 중앙에 "CPX" 텍스트 표시
-        Text(
-            text = "CPX",
-            fontSize = 96.sp, // 글자 크기 키움
-            fontWeight = FontWeight.Bold,
-            style = MaterialTheme.typography.headlineLarge
+    Box(modifier = Modifier.fillMaxSize()) {
+
+        // ✅ 1. 배경 이미지 (화면 꽉 채움)
+        Image(
+            painter = painterResource(id = R.drawable.bg),
+            contentDescription = null,
+            modifier = Modifier.fillMaxSize(),
+            contentScale = ContentScale.Crop   // ⭐ 화면 꽉 채움
         )
 
-        // 2. 하단에 깜빡이는 "START" 텍스트 추가
+        // ✅ 2. 가독성용 어둡기 오버레이 (선택)
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.25f))
+        )
+
+        // ✅ 3. 중앙 CPX (흰색)
+        Text(
+            text = "CPX",
+            fontSize = 96.sp,
+            fontWeight = FontWeight.Bold,
+            color = Color.White,
+            style = MaterialTheme.typography.headlineLarge,
+            modifier = Modifier.align(Alignment.Center)
+        )
+
+        // ✅ 4. 하단 START (흰색)
         Text(
             text = "START",
             fontSize = 24.sp,
             fontWeight = FontWeight.Medium,
+            color = Color.White,
             modifier = Modifier
-                .align(Alignment.BottomCenter) // 하단 중앙에 배치
+                .align(Alignment.BottomCenter)
                 .padding(bottom = 128.dp)
-                .alpha(alpha) // 애니메이션으로 alpha 값 적용
-                .clickable(onClick = onStartClick) // 3. 클릭 시 onStartClick 콜백 실행
+                .alpha(alpha)
+                .clickable(onClick = onStartClick)
         )
     }
 }

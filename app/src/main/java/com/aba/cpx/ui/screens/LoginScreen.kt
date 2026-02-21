@@ -1,5 +1,6 @@
 package com.aba.cpx.ui.screens
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -10,10 +11,13 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.aba.cpx.R
 import com.aba.cpx.data.model.Team
 import com.aba.cpx.data.model.TeamStatus
 import com.google.firebase.firestore.DocumentSnapshot
@@ -64,8 +68,6 @@ fun LoginScreen(
         val orderLong = d.getLong("order") ?: 0L
         val pw = d.getString("password") ?: ""
 
-        // DB에는 영어 문자열로 저장되어 있고, 앱에서는 enum으로 사용
-        // - null/이상값이면 fromKey에서 PREPARING으로 기본 처리됨
         val statusKey = d.getString("status") ?: "preparing"
         val statusEnum = TeamStatus.fromKey(statusKey)
 
@@ -101,7 +103,6 @@ fun LoginScreen(
                 isLoadingTeams = false
                 errorTeams = null
 
-                // 다이얼로그가 "팀"으로 열려있었는데 해당 팀이 사라졌으면 닫기
                 dialogTeam?.let { sel ->
                     if (showLoginDialog && !dialogIsManager && list.none { it.id == sel.id }) {
                         showLoginDialog = false
@@ -109,7 +110,6 @@ fun LoginScreen(
                         passwordInput = ""
                         loginError = null
                     } else if (showLoginDialog && !dialogIsManager) {
-                        // 최신 정보로 동기화
                         dialogTeam = list.firstOrNull { it.id == sel.id } ?: dialogTeam
                     }
                 }
@@ -140,7 +140,6 @@ fun LoginScreen(
                 isLoadingManagers = false
                 errorManagers = null
 
-                // 다이얼로그가 "운영팀"으로 열려있었는데 해당 운영팀이 사라졌으면 닫기
                 dialogTeam?.let { sel ->
                     if (showLoginDialog && dialogIsManager && list.none { it.id == sel.id }) {
                         showLoginDialog = false
@@ -148,7 +147,6 @@ fun LoginScreen(
                         passwordInput = ""
                         loginError = null
                     } else if (showLoginDialog && dialogIsManager) {
-                        // 최신 정보로 동기화
                         dialogTeam = list.firstOrNull { it.id == sel.id } ?: dialogTeam
                     }
                 }
@@ -161,103 +159,120 @@ fun LoginScreen(
     val anyError = errorTeams != null || errorManagers != null
 
     // -------------------------
-    // UI
+    // UI (✅ 배경 추가)
     // -------------------------
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color(0xFFF0F0F0)),
-        contentAlignment = Alignment.Center
-    ) {
-        Card(
+    Box(modifier = Modifier.fillMaxSize()) {
+
+        // ✅ 1) 배경 이미지 (Intro와 동일하게 꽉 채움)
+        Image(
+            painter = painterResource(id = R.drawable.bg),
+            contentDescription = null,
+            modifier = Modifier.fillMaxSize(),
+            contentScale = ContentScale.Crop
+        )
+
+        // ✅ 2) 가독성용 오버레이(선택)
+        Box(
             modifier = Modifier
-                .fillMaxWidth(0.8f)
-                .padding(24.dp),
-            shape = RoundedCornerShape(16.dp),
-            elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.25f))
+        )
+
+        // ✅ 3) 컨텐츠
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center
         ) {
-            Column(
-                modifier = Modifier.padding(24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(14.dp)
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth(0.8f)
+                    .padding(24.dp),
+                shape = RoundedCornerShape(16.dp),
+                elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
             ) {
-                Text("팀을 선택하세요", style = MaterialTheme.typography.titleLarge)
+                Column(
+                    modifier = Modifier.padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    Text("팀을 선택하세요", style = MaterialTheme.typography.titleLarge)
 
-                // -------------------------
-                // Teams 섹션
-                // -------------------------
-                SectionTitle("팀")
+                    // -------------------------
+                    // Teams 섹션
+                    // -------------------------
+                    SectionTitle("팀")
 
-                when {
-                    isLoadingTeams -> {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.Center
-                        ) { CircularProgressIndicator() }
+                    when {
+                        isLoadingTeams -> {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.Center
+                            ) { CircularProgressIndicator() }
+                        }
+
+                        errorTeams != null -> {
+                            Text(
+                                text = errorTeams!!,
+                                color = MaterialTheme.colorScheme.error,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+
+                        teams.isEmpty() -> {
+                            Text("등록된 팀이 없습니다.", textAlign = TextAlign.Center)
+                        }
+
+                        else -> {
+                            ButtonGrid5(
+                                items = teams,
+                                onItemClick = { openLoginDialog(it, isManager = false) }
+                            )
+                        }
                     }
 
-                    errorTeams != null -> {
+                    Spacer(Modifier.height(8.dp))
+
+                    // -------------------------
+                    // Managers 섹션
+                    // -------------------------
+                    SectionTitle("운영팀")
+
+                    when {
+                        isLoadingManagers -> {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.Center
+                            ) { CircularProgressIndicator() }
+                        }
+
+                        errorManagers != null -> {
+                            Text(
+                                text = errorManagers!!,
+                                color = MaterialTheme.colorScheme.error,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+
+                        managers.isEmpty() -> {
+                            Text("등록된 운영팀이 없습니다.", textAlign = TextAlign.Center)
+                        }
+
+                        else -> {
+                            ButtonGrid5(
+                                items = managers,
+                                onItemClick = { openLoginDialog(it, isManager = true) }
+                            )
+                        }
+                    }
+
+                    if (anyError && !anyLoading) {
+                        Spacer(Modifier.height(6.dp))
                         Text(
-                            text = errorTeams!!,
+                            text = "일부 목록을 불러오지 못했습니다.",
                             color = MaterialTheme.colorScheme.error,
                             textAlign = TextAlign.Center
                         )
                     }
-
-                    teams.isEmpty() -> {
-                        Text("등록된 팀이 없습니다.", textAlign = TextAlign.Center)
-                    }
-
-                    else -> {
-                        ButtonGrid5(
-                            items = teams,
-                            onItemClick = { openLoginDialog(it, isManager = false) }
-                        )
-                    }
-                }
-
-                Spacer(Modifier.height(8.dp))
-
-                // -------------------------
-                // Managers 섹션
-                // -------------------------
-                SectionTitle("운영팀")
-
-                when {
-                    isLoadingManagers -> {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.Center
-                        ) { CircularProgressIndicator() }
-                    }
-
-                    errorManagers != null -> {
-                        Text(
-                            text = errorManagers!!,
-                            color = MaterialTheme.colorScheme.error,
-                            textAlign = TextAlign.Center
-                        )
-                    }
-
-                    managers.isEmpty() -> {
-                        Text("등록된 운영팀이 없습니다.", textAlign = TextAlign.Center)
-                    }
-
-                    else -> {
-                        ButtonGrid5(
-                            items = managers,
-                            onItemClick = { openLoginDialog(it, isManager = true) }
-                        )
-                    }
-                }
-
-                if (anyError && !anyLoading) {
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        text = "일부 목록을 불러오지 못했습니다.",
-                        color = MaterialTheme.colorScheme.error,
-                        textAlign = TextAlign.Center
-                    )
                 }
             }
         }
@@ -279,7 +294,7 @@ fun LoginScreen(
                 title = { Text(titleText) },
                 text = {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text("선택: ${team.name}")
+                        Text("${team.name}")
 
                         OutlinedTextField(
                             value = passwordInput,
