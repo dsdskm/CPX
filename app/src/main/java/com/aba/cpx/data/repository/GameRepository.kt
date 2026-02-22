@@ -198,6 +198,7 @@ class GameRepository(
     suspend fun resetLiveGame(gameId: String) {
         val liveRef = gameRef(gameId)
 
+        // ✅ merge 없이 "완전 덮어쓰기" -> 기존 map key(1,2 등) 잔존 문제 근본 해결
         liveRef.set(
             mapOf(
                 "state" to GameState.WAITING.key,
@@ -207,6 +208,7 @@ class GameRepository(
                 "turnToken" to null,
                 "lastAttackedTeamId" to null,
 
+                // ✅ Firestore map은 key가 String이므로 String 키로 통일
                 "scoresByTeamId" to emptyMap<String, Int>(),
                 "initialScoresByTeamId" to emptyMap<String, Int>(),
                 "finalScoresByTeamId" to emptyMap<String, Int>(),
@@ -218,10 +220,11 @@ class GameRepository(
                 "startedAt" to null,
                 "endedAt" to null,
                 "updatedAt" to FieldValue.serverTimestamp(),
-            ),
-            SetOptions.merge()
+            )
+            // ❌ SetOptions.merge() 제거!
         ).await()
 
+        // turns 서브컬렉션 삭제
         deleteAllDocumentsInSubCollection(turnsCol(gameId))
     }
 

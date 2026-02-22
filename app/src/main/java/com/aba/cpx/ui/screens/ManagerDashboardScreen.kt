@@ -1,6 +1,7 @@
 // ManagerDashboardScreen.kt
 package com.aba.cpx.ui.screens
 
+import android.util.Log
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -36,7 +37,7 @@ fun ManagerDashboardScreen(
 ) {
     val teamRepo = remember { TeamRepository() }
     val gameRepo = remember { GameRepository() }
-    val adminRepo = remember { AdminRepository() } // ✅ 종료/초기화/전력배치 점수 로딩 전담
+    val adminRepo = remember { AdminRepository() }
 
     var teams by remember { mutableStateOf<List<Team>>(emptyList()) }
     var isTeamsLoading by remember { mutableStateOf(true) }
@@ -51,10 +52,16 @@ fun ManagerDashboardScreen(
     var showResetConfirm by remember { mutableStateOf(false) }
     var isSubmitting by remember { mutableStateOf(false) }
 
-    // ✅ WAITING 상태 전력배치 기반 점수 캐시
+    // ✅ WAITING 상태 전력배치 기반 점수 캐시 (표시/초기점수에만 사용)
     var placementScores by remember { mutableStateOf<Map<Int, Int>>(emptyMap()) }
     var isPlacementLoading by remember { mutableStateOf(false) }
     var placementErrorMsg by remember { mutableStateOf<String?>(null) }
+
+    // ✅ reset 이후 game 문서 재구독 트리거
+    var relistenKey by remember { mutableIntStateOf(0) }
+
+    // ✅ reset 이후 placementScores 로딩을 확실히 다시 돌리기 위한 epoch
+    var resetEpoch by remember { mutableIntStateOf(0) }
 
     val snackHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -81,8 +88,12 @@ fun ManagerDashboardScreen(
         onDispose { reg.remove() }
     }
 
-    // ✅ game 실시간 구독
-    DisposableEffect(gameId) {
+    // ✅ game 실시간 구독 (relistenKey 포함)
+    DisposableEffect(gameId, relistenKey) {
+        // "첫 진입"처럼 보이도록 구독 시작 시 로딩 상태로
+        isGameLoading = true
+        gameErrorMsg = null
+
         gameRepo.ensureLiveGameExists(gameId)
         val reg = gameRepo.listenGame(
             gameId = gameId,
@@ -102,7 +113,6 @@ fun ManagerDashboardScreen(
     val gameState = game?.state ?: GameState.WAITING
     val teamsInOrderPreview = remember(teams) { teams.sortedBy { it.order } }
 
-    // ✅ 모든 팀 READY 여부
     val allReady = remember(teams) {
         teams.isNotEmpty() && teams.all { it.status == TeamStatus.READY }
     }
@@ -119,7 +129,6 @@ fun ManagerDashboardScreen(
     val canStart = allReady && !isSubmitting && (gameState == GameState.WAITING)
     val startStateOk = !isSubmitting && (gameState == GameState.WAITING)
 
-    // ✅ 중단/재개는 게임 상태만 변경
     val canPause = !isSubmitting && gameState == GameState.WORKING
     val canResume = !isSubmitting && gameState == GameState.PAUSED
     val canTogglePauseResume = canPause || canResume
@@ -137,8 +146,9 @@ fun ManagerDashboardScreen(
 
     // --------------------------------------------
     // ✅ WAITING 상태에서 전력배치 점수 로딩
+    //  - resetEpoch를 키에 포함해서 "초기화 후"에도 강제로 다시 로딩
     // --------------------------------------------
-    LaunchedEffect(gameState, teams) {
+    LaunchedEffect(gameState, teams, resetEpoch) {
         if (gameState != GameState.WAITING) return@LaunchedEffect
         if (teams.isEmpty()) return@LaunchedEffect
 
@@ -157,43 +167,45 @@ fun ManagerDashboardScreen(
         }
     }
 
-    val roundText = remember(gameState, game) {
-        if (gameState != GameState.WORKING) return@remember ""
-        val orderCount = game?.order?.size ?: 0
-        val turnIndex = game?.turnIndex ?: 0
-        if (orderCount <= 0) "-" else "${(turnIndex / orderCount) + 1}R"
+    // ✅ 라운드 표기: "라운드 (1/10)" 형태
+    val roundNumber = remember(gameState, game) {
+        if (gameState != GameState.WORKING) 0
+        else {
+            val orderCount = game?.order?.size ?: 0
+            val turnIndex = game?.turnIndex ?: 0
+            if (orderCount <= 0) 0 else (turnIndex / orderCount) + 1
+        }
     }
+    val roundLabel = if (roundNumber <= 0) "-" else roundNumber.toString()
 
     val currentTeamText = remember(gameState, game, currentTeamName) {
         if (gameState != GameState.WORKING) ""
         else currentTeamName ?: (game?.currentTeamId?.toString() ?: "")
     }
 
-    // ✅ 상태에 따른 팀 정렬
-    val sortedTeams = remember(teams, gameState, game, placementScores) {
+    // ✅ 정렬 규칙
+    // - 기본: 항상 팀 order
+    // - COMPLETED일 때만 점수 내림차순, 동점이면 order
+    val sortedTeams = remember(teams, gameState, game) {
         when (gameState) {
             GameState.COMPLETED -> {
-                teams.sortedByDescending { t ->
-                    game?.finalScoresByTeamId?.get(t.id)
-                        ?: game?.scoresByTeamId?.get(t.id)
-                        ?: 0
-                }
-            }
-            GameState.WAITING -> {
-                teams.sortedByDescending { t -> placementScores[t.id] ?: 0 }
+                teams.sortedWith(
+                    compareByDescending<Team> { t ->
+                        game?.finalScoresByTeamId?.get(t.id)
+                            ?: game?.scoresByTeamId?.get(t.id)
+                            ?: 0
+                    }.thenBy { it.order }
+                )
             }
             else -> teams.sortedBy { it.order }
         }
     }
 
-    // ✅ 버튼 색상 (요구: 비활성일 때 회색)
     val disabledBg = Color(0xFFE0E0E0)
     val disabledFg = Color(0xFF777777)
 
-    // ✅✅ 배경 이미지 + 오버레이 + 컨텐츠
     Box(modifier = Modifier.fillMaxSize()) {
 
-        // ✅ 배경 이미지
         Image(
             painter = painterResource(id = R.drawable.bg),
             contentDescription = null,
@@ -201,14 +213,12 @@ fun ManagerDashboardScreen(
             contentScale = ContentScale.Crop
         )
 
-        // ✅ 약한 오버레이(원하면 alpha만 조절)
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(Color.Black.copy(alpha = 0.10f))
         )
 
-        // ✅ 실제 UI
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -260,7 +270,7 @@ fun ManagerDashboardScreen(
                                         .padding(horizontal = 12.dp, vertical = 6.dp)
                                 ) {
                                     Text(
-                                        text = "$stateLabelKo",
+                                        text = stateLabelKo,
                                         color = Color.White,
                                         style = MaterialTheme.typography.labelMedium,
                                         maxLines = 1,
@@ -270,7 +280,7 @@ fun ManagerDashboardScreen(
 
                                 Text(
                                     text = buildString {
-                                        append("${roundText}R (${roundText}/${MAX_ROUNDS})")
+                                        append("라운드 ($roundLabel/$MAX_ROUNDS)")
                                         if (currentTeamText.isNotBlank()) append("  ·  현재팀: $currentTeamText")
                                     },
                                     style = MaterialTheme.typography.titleMedium,
@@ -340,7 +350,10 @@ fun ManagerDashboardScreen(
                                 initialScore = initialScore,
                                 damageTaken = damageTaken,
                                 bonus = bonus,
-                                isCurrentTurn = ((gameState == GameState.WORKING || gameState == GameState.PAUSED) && game?.currentTeamId == t.id),
+                                isCurrentTurn = (
+                                        (gameState == GameState.WORKING || gameState == GameState.PAUSED)
+                                                && game?.currentTeamId == t.id
+                                        ),
                                 onViewPlacement = { teamId2, teamName2, scoreOrNull ->
                                     onViewPlacement(teamId2, teamName2, scoreOrNull)
                                 }
@@ -375,7 +388,6 @@ fun ManagerDashboardScreen(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                // ✅ 게임 시작: 비활성 시 회색
                 Button(
                     onClick = {
                         if (!startStateOk) {
@@ -457,7 +469,7 @@ fun ManagerDashboardScreen(
                     onClick = { showFinishConfirm = true },
                     enabled = canFinish,
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.error,   // 활성
+                        containerColor = MaterialTheme.colorScheme.error,
                         contentColor = Color.White,
                         disabledContainerColor = disabledBg,
                         disabledContentColor = disabledFg
@@ -465,11 +477,8 @@ fun ManagerDashboardScreen(
                     modifier = Modifier
                         .weight(1f)
                         .height(52.dp)
-                ) {
-                    Text("종료")
-                }
+                ) { Text("종료") }
 
-                // ✅ 초기화: 비활성 시 회색
                 OutlinedButton(
                     onClick = {
                         if (!canReset) {
@@ -526,8 +535,7 @@ fun ManagerDashboardScreen(
                         enabled = canStart,
                         onClick = {
                             isSubmitting = true
-                            val snapshotTeams = teams
-                            val teamsInOrder = snapshotTeams.sortedBy { it.order }
+                            val teamsInOrder = teams.sortedBy { it.order }
 
                             gameRepo.startGame(
                                 gameId = gameId,
@@ -551,7 +559,7 @@ fun ManagerDashboardScreen(
             )
         }
 
-        // ✅ 종료 Confirm (AdminRepository로 위임)
+        // ✅ 종료 Confirm
         if (showFinishConfirm) {
             AlertDialog(
                 onDismissRequest = { if (!isSubmitting) showFinishConfirm = false },
@@ -584,7 +592,7 @@ fun ManagerDashboardScreen(
             )
         }
 
-        // ✅ 초기화 Confirm (AdminRepository로 위임)
+        // ✅ 초기화 Confirm
         if (showResetConfirm) {
             AlertDialog(
                 onDismissRequest = { if (!isSubmitting) showResetConfirm = false },
@@ -604,7 +612,28 @@ fun ManagerDashboardScreen(
                             scope.launch {
                                 try {
                                     adminRepo.resetAll(gameId)
+                                    Log.d("KKH", "reset done, gameId=$gameId")
+
+                                    // ✅✅ "첫 진입"처럼: 화면 상태를 통째로 초기화
                                     placementScores = emptyMap()
+                                    placementErrorMsg = null
+                                    isPlacementLoading = false
+
+                                    game = null
+                                    isGameLoading = true
+                                    gameErrorMsg = null
+
+                                    // teams는 이미 실시간 구독 중이라 굳이 비우지 않아도 됨
+                                    // 원하면 첫 진입처럼 로딩 표시:
+                                    // isTeamsLoading = true
+                                    // teamsErrorMsg = null
+
+                                    // ✅✅ 최신 스냅샷 강제 재수신
+                                    relistenKey++
+
+                                    // ✅✅ placementScores도 WAITING에서 다시 로딩 강제
+                                    resetEpoch++
+
                                     isSubmitting = false
                                     showResetConfirm = false
                                     toast("초기화 완료")
