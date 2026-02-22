@@ -1,11 +1,11 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Card, Table, message, Tag, Typography } from "antd";
+import { Card, Table, message, Tag, Typography, Button, Modal } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { collection, onSnapshot, query } from "firebase/firestore";
+import { DeleteOutlined } from "@ant-design/icons";
+import { collection, onSnapshot, query, deleteDoc, doc } from "firebase/firestore";
 import { db } from "../lib/firebase";
 
 type GameState = "waiting" | "working" | "paused" | "completed" | string;
-
 type ScoresMap = Record<string, number>;
 
 type GameDoc = {
@@ -50,6 +50,22 @@ function normalizeScoresMap(raw: unknown): ScoresMap {
   return out;
 }
 
+/**
+ * 20260222003315311 → 2026-02-22 00:33:15
+ */
+function formatGameIdAsDate(id: string): string {
+  if (!/^\d{17}$/.test(id)) return id;
+
+  const year = id.slice(0, 4);
+  const month = id.slice(4, 6);
+  const day = id.slice(6, 8);
+  const hour = id.slice(8, 10);
+  const minute = id.slice(10, 12);
+  const second = id.slice(12, 14);
+
+  return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
+}
+
 function ScoreTable({ title, data }: { title: string; data: ScoresMap }) {
   const rows = Object.entries(data)
     .map(([teamId, score]) => ({ teamId, score }))
@@ -74,22 +90,18 @@ function ScoreTable({ title, data }: { title: string; data: ScoresMap }) {
   );
 }
 
-/**
- * ✅ 라운드 계산 (질문에서 준 Kotlin 로직 그대로)
- * - 전체 팀이 한 턴씩 돌면 1 라운드 증가
- * - turnIndex는 0부터 시작한다고 가정
- */
 function calcRoundInfo(turnIndex: number, totalTeams: number) {
   const round = totalTeams <= 0 ? 0 : Math.floor(turnIndex / totalTeams) + 1;
   const posInRound = totalTeams <= 0 ? 0 : (turnIndex % totalTeams) + 1;
   const roundShown = round <= 0 ? 0 : Math.min(round, 10);
-
   return { round, posInRound, roundShown };
 }
 
 export default function BattleResults() {
   const [games, setGames] = useState<GameDoc[]>([]);
   const [loading, setLoading] = useState(false);
+  const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     setLoading(true);
@@ -113,9 +125,7 @@ export default function BattleResults() {
           };
         });
 
-        // 보기 편하게: id(날짜형일 때) 내림차순
         list.sort((a, b) => String(b.id).localeCompare(String(a.id)));
-
         setGames(list);
         setLoading(false);
       },
@@ -129,13 +139,49 @@ export default function BattleResults() {
     return () => unsub();
   }, []);
 
+  const handleDelete = async () => {
+    if (selectedRowKeys.length === 0) {
+      message.warning("삭제할 게임을 선택하세요.");
+      return;
+    }
+
+    Modal.confirm({
+      title: "선택한 게임을 삭제하시겠습니까?",
+      content: `총 ${selectedRowKeys.length}개의 게임이 삭제됩니다.`,
+      okText: "삭제",
+      okType: "danger",
+      cancelText: "취소",
+      onOk: async () => {
+        try {
+          setDeleting(true);
+          await Promise.all(
+            selectedRowKeys.map((id) =>
+              deleteDoc(doc(db, "games", String(id)))
+            )
+          );
+          message.success("삭제가 완료되었습니다.");
+          setSelectedRowKeys([]);
+        } catch (err) {
+          console.error(err);
+          message.error("삭제 중 오류가 발생했습니다.");
+        } finally {
+          setDeleting(false);
+        }
+      },
+    });
+  };
+
   const columns: ColumnsType<GameDoc> = useMemo(
     () => [
       {
         title: "게임ID",
         dataIndex: "id",
         width: 300,
-        render: (v: string) => <Typography.Text code>{v}</Typography.Text>,
+        render: (v: string) => (
+          <Typography.Text code>
+            {v === "default_game" ? v : formatGameIdAsDate(v)}
+          </Typography.Text>
+        ),
       },
       {
         title: "게임 상태",
@@ -146,8 +192,6 @@ export default function BattleResults() {
           return <Tag color={STATE_COLOR[key] ?? "default"}>{STATE_LABEL[key] ?? key}</Tag>;
         },
       },
-
-      // ✅ 라운드 계산해서 표시
       {
         title: "라운드",
         key: "round",
@@ -155,17 +199,11 @@ export default function BattleResults() {
         render: (_: any, record) => {
           const turnIndex = record.turnIndex ?? 0;
           const totalTeams = record.order?.length ?? 0;
-
-          const { roundShown, posInRound } = calcRoundInfo(turnIndex, totalTeams);
-
+          const { roundShown } = calcRoundInfo(turnIndex, totalTeams);
           if (totalTeams <= 0) return "-";
-
-          // 예: 3/10 (2/5)  -> 3라운드 / 10, 이번 라운드 2번째 / 전체 5팀
           return `${roundShown}R / 10`;
         },
       },
-
-      // ✅ 컬럼 위치 변경: "공격 순서" 먼저, 그 다음 "현재 턴"
       {
         title: "공격 순서",
         dataIndex: "order",
@@ -188,7 +226,6 @@ export default function BattleResults() {
         width: 120,
         render: (v?: number | null) => (v ? `${v}팀` : "-"),
       },
-
       {
         title: "최초 점수",
         dataIndex: "initialScoresByTeamId",
@@ -217,13 +254,37 @@ export default function BattleResults() {
     [],
   );
 
+  const rowSelection = {
+    selectedRowKeys,
+    onChange: (newSelectedRowKeys: React.Key[]) => {
+      setSelectedRowKeys(newSelectedRowKeys);
+    },
+    getCheckboxProps: (record: GameDoc) => ({
+      disabled: record.id === "default_game",
+    }),
+  };
+
   return (
-    <Card title="전투 결과">
+    <Card
+      title="전투 결과"
+      extra={
+        <Button
+          danger
+          icon={<DeleteOutlined />}
+          disabled={selectedRowKeys.length === 0}
+          loading={deleting}
+          onClick={handleDelete}
+        >
+          선택 삭제
+        </Button>
+      }
+    >
       <Table<GameDoc>
         rowKey={(r) => r.id}
         columns={columns}
         dataSource={games}
         loading={loading}
+        rowSelection={rowSelection}
         pagination={{ pageSize: 10, showSizeChanger: true }}
         scroll={{ x: 1400 }}
       />

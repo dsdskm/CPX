@@ -169,7 +169,7 @@ export default function Teams() {
                     const raw = d.data() as Team;
                     return {
                         ...raw,
-                        status: (raw.status ?? "waiting") as TeamStatus,
+                        status: (raw.status ?? "preparing") as TeamStatus,
                     };
                 });
 
@@ -260,7 +260,7 @@ export default function Teams() {
         setEditing(null);
         form.resetFields();
         // ✅ 기본 status 설정
-        form.setFieldsValue({ status: "waiting" });
+        form.setFieldsValue({ status: "preparing" });
         setOpen(true);
     };
 
@@ -271,7 +271,7 @@ export default function Teams() {
             id: team.id,
             name: team.name,
             password: team.password,
-            status: ((team.status ?? "waiting") as TeamStatus),
+            status: ((team.status ?? "preparing") as TeamStatus),
         });
         setOpen(true);
     };
@@ -296,7 +296,7 @@ export default function Teams() {
             name: values.name,
             password: values.password,
             order: nextOrder,
-            status: values.status ?? "waiting", // ✅ 추가
+            status: values.status ?? "preparing", // ✅ 추가
         };
 
         await setDoc(teamRef, newTeam);
@@ -513,11 +513,10 @@ export default function Teams() {
                     >
                         <Select
                             options={[
-                                { value: "waiting", label: "대기 (waiting)" },
-                                { value: "ready", label: "준비 (ready)" },
-                                { value: "working", label: "진행 (working)" },
-                                { value: "paused", label: "중지 (paused)" },
-                                { value: "completed", label: "완료 (completed)" },
+                                { value: "preparing", label: "준비중" },
+                                { value: "ready", label: "준비완료" },
+                                { value: "working", label: "진행중" },
+                                { value: "completed", label: "종료" },
                             ]}
                         />
                     </Form.Item>
