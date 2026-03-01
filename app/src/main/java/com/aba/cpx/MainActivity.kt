@@ -77,8 +77,6 @@ fun AppNavigator() {
     }
 
     // ✅ “내 턴인데도 전략 화면(보드뷰)에 잠깐 머무를지” 플래그
-    // - ‘나의 전략 확인’을 눌렀을 때만 true
-    // - 턴이 끝나면 자동 false
     var stayOnBoardDuringMyTurn by remember { mutableStateOf(false) }
 
     fun navigate(to: Screen, clearBackStack: Boolean = false) {
@@ -98,14 +96,6 @@ fun AppNavigator() {
         } else false
     }
 
-    // ------------------------------------------------------------
-    // ✅ 뒤로가기 정책 (스택 1개여도 종료되지 않게)
-    // - Waiting: 완전 차단
-    // - 스택 > 1: pop
-    // - 스택 == 1:
-    //    - 팀 화면(Attack/MyBoardView/PowerPlacement) 이면 Waiting으로
-    //    - 그 외(Intro/Login/ManagerDashboard 등)면 시스템 back
-    // ------------------------------------------------------------
     val onBackDispatcher = LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
 
     val backBlockedScreens = setOf(Screen.Waiting)
@@ -132,47 +122,49 @@ fun AppNavigator() {
 
     /**
      * ✅ 로그인 직후 1회용 fallback: 내 턴 판단
+     * - GameRepository.submitTurn()에서 "라운드마다 시작팀 1칸 회전" 규칙을 쓰고 있으니
+     *   여기 계산도 동일 규칙으로 맞춰야 함.
      */
     suspend fun isMyTurnNow(team: Team, gameId: String): Boolean {
         return try {
             val snap = db.collection("games").document(gameId).get().await()
             if (!snap.exists()) return false
 
-            val currentTeamId = (snap.getLong("currentTeamId") ?: 0L).toInt()
-            if (currentTeamId != 0) return currentTeamId == team.id
+            val stateStr = snap.getString("state") ?: ""
+            val state = stateStr.trim().lowercase()
+
+            val currentTeamId = snap.getLong("currentTeamId")?.toInt()
+            if (state == GameState.WORKING.key && currentTeamId != null) {
+                return currentTeamId == team.id
+            }
 
             val turnIndex = (snap.getLong("turnIndex") ?: 0L).toInt()
             val orderList = snap.get("order") as? List<*>
+            if (orderList.isNullOrEmpty()) return false
 
-            if (!orderList.isNullOrEmpty()) {
-                val items = orderList.mapNotNull { any ->
-                    val m = any as? Map<*, *> ?: return@mapNotNull null
-                    val tid = (m["teamId"] as? Number)?.toInt() ?: return@mapNotNull null
-                    val ord = (m["order"] as? Number)?.toInt() ?: 0
-                    tid to ord
-                }.sortedBy { it.second }
-
-                if (items.isNotEmpty()) {
-                    val idx = if (turnIndex >= 0) turnIndex % items.size else 0
-                    return items[idx].first == team.id
-                }
+            val teamIdsInOrder: List<Int> = orderList.mapNotNull { any ->
+                val m = any as? Map<*, *> ?: return@mapNotNull null
+                (m["teamId"] as? Number)?.toInt()
             }
 
-            (team.order == turnIndex) || (team.order == turnIndex + 1)
+            val teamCount = teamIdsInOrder.size
+            if (teamCount <= 0) return false
+
+            // ✅ submitTurn()와 동일한 회전 규칙
+            val round = turnIndex / teamCount       // 0=1R, 1=2R...
+            val posInRound = turnIndex % teamCount  // 0..teamCount-1
+            val roundStartOffset = round % teamCount
+            val rotatedIndex = (roundStartOffset + posInRound) % teamCount
+
+            val expectedCurrentTeamId = teamIdsInOrder.getOrNull(rotatedIndex) ?: return false
+            expectedCurrentTeamId == team.id
         } catch (_: Exception) {
             false
         }
     }
 
     // ------------------------------------------------------------
-    // ✅ 전역 턴 네비게이션 가드 (충돌 해결)
-    //
-    // 규칙:
-    // 1) "내 턴이 새로 시작되는 순간"에는 무조건 Attack으로 이동 (보드뷰 예외 무시)
-    // 2) 내 턴이 이미 진행중일 때:
-    //    - 기본은 Attack에 머물게 함
-    //    - 단, stayOnBoardDuringMyTurn=true 이고 현재 화면이 MyBoardView이면 머무르게 허용
-    // 3) 내 턴이 끝나면(=myTurn false) stayOnBoardDuringMyTurn 자동 해제
+    // ✅ 전역 턴 네비게이션 가드
     // ------------------------------------------------------------
     var prevMyTurn by remember { mutableStateOf(false) }
 
@@ -223,6 +215,15 @@ fun AppNavigator() {
         }
     }
 
+    // ✅✅✅ 공통 로그아웃 (모든 화면에서 동일하게 사용)
+    fun logoutAndGoLogin() {
+        loggedInTeam = null
+        isManager = false
+        stayOnBoardDuringMyTurn = false
+        prevMyTurn = false
+        navigate(Screen.Login, clearBackStack = true)
+    }
+
     when (currentScreen) {
         Screen.Intro -> {
             IntroScreen(onStartClick = { navigate(Screen.Login) })
@@ -246,7 +247,6 @@ fun AppNavigator() {
                         TeamStatus.READY -> navigate(Screen.Waiting, clearBackStack = true)
 
                         TeamStatus.WORKING -> {
-                            // ✅ 로그인 직후 liveGame이 아직 안 왔을 수 있어 1회 fallback
                             scope.launch {
                                 val myTurn = isMyTurnNow(team, gameId)
                                 val next = if (myTurn) Screen.Attack else Screen.MyBoardView
@@ -272,7 +272,8 @@ fun AppNavigator() {
                     onMoveToWaiting = {
                         stayOnBoardDuringMyTurn = false
                         navigate(Screen.Waiting, clearBackStack = true)
-                    }
+                    },
+                    onLogout = { logoutAndGoLogin() }
                 )
             }
         }
@@ -313,7 +314,8 @@ fun AppNavigator() {
                     onGoAttack = {
                         stayOnBoardDuringMyTurn = false
                         navigate(Screen.Attack, clearBackStack = true)
-                    }
+                    },
+                    onLogout = { logoutAndGoLogin() }
                 )
             }
         }
@@ -336,10 +338,10 @@ fun AppNavigator() {
                         navigate(Screen.MyBoardView, clearBackStack = true)
                     },
                     onGoMyStrategy = {
-                        // ✅ 내가 눌러서 전략 확인하려는 경우만 예외 허용
                         stayOnBoardDuringMyTurn = true
                         navigate(Screen.MyBoardView, clearBackStack = true)
-                    }
+                    },
+                    onLogout = { logoutAndGoLogin() }
                 )
             }
         }
@@ -352,7 +354,8 @@ fun AppNavigator() {
                     viewTeamName = tName
                     viewTeamScore = score
                     navigate(Screen.PlacementViewer)
-                }
+                },
+                onLogout = { logoutAndGoLogin() }
             )
         }
 
@@ -361,7 +364,8 @@ fun AppNavigator() {
                 teamId = viewTeamId,
                 teamName = viewTeamName,
                 score = viewTeamScore,
-                onBack = { popBack(); Unit }
+                onBack = { popBack(); Unit },
+                onLogout = { logoutAndGoLogin() }
             )
         }
     }

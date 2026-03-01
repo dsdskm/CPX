@@ -37,9 +37,6 @@ class GameRepository(
     private fun turnsCol(gameId: String) =
         db.collection("games").document(gameId).collection("turns")
 
-    // -------------------------------------------
-    // ✅ state 파싱: 신버전(key) + 구버전(READY/RUNNING/...) 자동 매핑
-    // -------------------------------------------
     private fun parseGameState(stateStr: String?): GameState {
         if (stateStr.isNullOrBlank()) return GameState.WAITING
 
@@ -56,9 +53,6 @@ class GameRepository(
         }
     }
 
-    // -------------------------------
-    // 점수 map 변환
-    // -------------------------------
     private fun parseScoresMap(raw: Any?): Map<Int, Int> {
         val m = raw as? Map<*, *> ?: return emptyMap()
         val out = mutableMapOf<Int, Int>()
@@ -83,7 +77,6 @@ class GameRepository(
     private fun toFirestoreScoresMap(scores: Map<Int, Int>): Map<String, Int> =
         scores.entries.associate { (k, v) -> k.toString() to v }
 
-    // ✅ Map<Int, List<Int>> 파싱 (attackedTargetsByTeamId)
     private fun parseIntListMap(raw: Any?): Map<Int, List<Int>> {
         val m = raw as? Map<*, *> ?: return emptyMap()
         val out = mutableMapOf<Int, List<Int>>()
@@ -107,7 +100,6 @@ class GameRepository(
         return out
     }
 
-    // ✅ Map<Int, Int> 파싱 (lastTargetByTeamId)
     private fun parseIntMap(raw: Any?): Map<Int, Int> {
         val m = raw as? Map<*, *> ?: return emptyMap()
         val out = mutableMapOf<Int, Int>()
@@ -129,7 +121,6 @@ class GameRepository(
         return out
     }
 
-    // ✅ 현재점수 = initial - damageTaken + bonus 로 강제 재계산
     private fun recomputeScores(
         initial: Map<Int, Int>,
         damageTaken: Map<Int, Int>,
@@ -148,8 +139,6 @@ class GameRepository(
 
     // ------------------------------------------------------------
     // ✅ (운영) 게임 종료 + 아카이브
-    // - games/{gameId} 내용을 games/{archiveId}로 복사
-    // - live 게임 COMPLETED 처리
     // ------------------------------------------------------------
     suspend fun finishGameAndArchive(gameId: String): String {
         val liveRef = gameRef(gameId)
@@ -198,7 +187,6 @@ class GameRepository(
     suspend fun resetLiveGame(gameId: String) {
         val liveRef = gameRef(gameId)
 
-        // ✅ merge 없이 "완전 덮어쓰기" -> 기존 map key(1,2 등) 잔존 문제 근본 해결
         liveRef.set(
             mapOf(
                 "state" to GameState.WAITING.key,
@@ -206,9 +194,10 @@ class GameRepository(
                 "turnIndex" to 0,
                 "currentTeamId" to null,
                 "turnToken" to null,
-                "lastAttackedTeamId" to null,
 
-                // ✅ Firestore map은 key가 String이므로 String 키로 통일
+                "lastAttackedTeamId" to null,
+                "lastAttackedStreak" to 0, // ✅ 추가
+
                 "scoresByTeamId" to emptyMap<String, Int>(),
                 "initialScoresByTeamId" to emptyMap<String, Int>(),
                 "finalScoresByTeamId" to emptyMap<String, Int>(),
@@ -221,10 +210,8 @@ class GameRepository(
                 "endedAt" to null,
                 "updatedAt" to FieldValue.serverTimestamp(),
             )
-            // ❌ SetOptions.merge() 제거!
         ).await()
 
-        // turns 서브컬렉션 삭제
         deleteAllDocumentsInSubCollection(turnsCol(gameId))
     }
 
@@ -261,7 +248,9 @@ class GameRepository(
                     "turnIndex" to 0,
                     "currentTeamId" to null,
                     "turnToken" to null,
+
                     "lastAttackedTeamId" to null,
+                    "lastAttackedStreak" to 0, // ✅ 추가
 
                     "scoresByTeamId" to emptyMap<String, Int>(),
                     "initialScoresByTeamId" to emptyMap<String, Int>(),
@@ -333,6 +322,9 @@ class GameRepository(
                     val attackedTargetsByTeamId = parseIntListMap(snap.get("attackedTargetsByTeamId"))
                     val lastTargetByTeamId = parseIntMap(snap.get("lastTargetByTeamId"))
 
+                    // ✅ 추가 파싱
+                    val lastAttackedStreak = (snap.getLong("lastAttackedStreak") ?: 0L).toInt()
+
                     val game = Game(
                         id = snap.id,
                         state = state,
@@ -341,6 +333,8 @@ class GameRepository(
                         currentTeamId = snap.getLong("currentTeamId")?.toInt(),
                         turnToken = snap.getString("turnToken"),
                         lastAttackedTeamId = snap.getLong("lastAttackedTeamId")?.toInt(),
+                        lastAttackedStreak = lastAttackedStreak, // ✅
+
                         startedAt = snap.getTimestamp("startedAt")?.toDate()?.time,
                         endedAt = snap.getTimestamp("endedAt")?.toDate()?.time,
                         updatedAt = snap.getTimestamp("updatedAt")?.toDate()?.time,
@@ -421,7 +415,9 @@ class GameRepository(
                             "turnIndex" to 0,
                             "currentTeamId" to firstTeamId,
                             "turnToken" to UUID.randomUUID().toString(),
+
                             "lastAttackedTeamId" to null,
+                            "lastAttackedStreak" to 0, // ✅ 추가
 
                             "initialScoresByTeamId" to initialFs,
                             "damageTakenByTeamId" to emptyMap<String, Int>(),
@@ -441,7 +437,6 @@ class GameRepository(
                     null
                 }
                     .addOnSuccessListener {
-                        // ✅ teams 상태 변경은 TeamRepository로 위임
                         teamRepo.updateAllTeamsStatus(
                             TeamStatus.WORKING,
                             onSuccess = onSuccess,
@@ -484,6 +479,7 @@ class GameRepository(
             ?: return onFail(IllegalArgumentException("targetTeamId missing"))
 
         val prevLast = (payload["prevLastAttackedTeamId"] as? Number)?.toInt() ?: -1
+        val prevStreak = (payload["prevLastAttackedStreak"] as? Number)?.toInt() ?: -1 // ✅ 추가
 
         val cellsRaw = payload["cells"] as? List<*> ?: emptyList<Any?>()
         val picks: List<Pair<Int, Int>> = cellsRaw.mapNotNull { any ->
@@ -516,6 +512,7 @@ class GameRepository(
                     val turnIndex = (gSnap.getLong("turnIndex") ?: 0L).toInt()
 
                     val lastAttackedServer = gSnap.getLong("lastAttackedTeamId")?.toInt() ?: -1
+                    val lastStreakServer = (gSnap.getLong("lastAttackedStreak") ?: 0L).toInt() // ✅
 
                     if (state != GameState.WORKING) throw IllegalStateException("not working")
                     if (currentTeamId != teamId) throw IllegalStateException("not your turn")
@@ -524,17 +521,22 @@ class GameRepository(
                     }
 
                     if (targetTeamId == teamId) throw IllegalStateException("cannot attack self")
-                    if (lastAttackedServer != -1 && targetTeamId == lastAttackedServer) {
-                        throw IllegalStateException("cannot attack same team twice in a row")
+
+                    // ✅✅✅ 변경: 2번까지는 허용, 3번째부터 금지
+                    if (lastAttackedServer != -1 && targetTeamId == lastAttackedServer && lastStreakServer >= 2) {
+                        throw IllegalStateException("cannot attack same team 3 times in a row")
                     }
+
+                    // ✅ 레이스 방지
                     if (prevLast != -1 && prevLast != lastAttackedServer) {
                         throw IllegalStateException("state changed, retry")
                     }
+                    if (prevStreak != -1 && prevStreak != lastStreakServer) {
+                        throw IllegalStateException("state changed, retry")
+                    }
 
-                    // ✅ 타겟 placement 읽기
                     val pSnap = tx.get(placementRef)
 
-                    // placements -> Set key(c:r)
                     val placementKeys = mutableSetOf<String>()
                     val placements = (pSnap.get("placements") as? List<*>) ?: emptyList<Any?>()
                     placements.forEach { pAny ->
@@ -548,7 +550,6 @@ class GameRepository(
                         }
                     }
 
-                    // 기존 hitCells -> Set key(c:r)
                     val existingHitKeys = mutableSetOf<String>()
                     val existingHits = (pSnap.get("hitCells") as? List<*>) ?: emptyList<Any?>()
                     existingHits.forEach { hAny ->
@@ -580,35 +581,28 @@ class GameRepository(
                             )
                         }
 
-                        // ✅ 명중 정의: 배치에 존재 + 아직 처음 맞음
                         if (onPlacement && !alreadyHit) {
                             hitCount += 1
                             damage += powerPlacementRepo.pointsForCol(c)
                         }
                     }
 
-                    // ✅ 가점: 1발당 +3, 3발 모두 명중이면 +3 추가 => 최대 12
                     val bonusGain = (hitCount * 3) + (if (hitCount == 3) 3 else 0)
 
-                    // ✅ 누적 맵 로드
                     val initial = parseScoresMap(gSnap.get("initialScoresByTeamId"))
                     val damageTaken = parseScoresMap(gSnap.get("damageTakenByTeamId")).toMutableMap()
                     val bonus = parseScoresMap(gSnap.get("bonusByTeamId")).toMutableMap()
 
-                    // ✅ 타겟 감점 누적
                     if (damage > 0) {
                         damageTaken[targetTeamId] = (damageTaken[targetTeamId] ?: 0) + damage
                     }
 
-                    // ✅ 공격자 가점 누적
                     if (bonusGain > 0) {
                         bonus[teamId] = (bonus[teamId] ?: 0) + bonusGain
                     }
 
-                    // ✅ 현재점수 재계산
                     val scores = recomputeScores(initial, damageTaken, bonus)
 
-                    // ✅ 턴 진행
                     val orderList = (gSnap.get("order") as? List<Map<String, Any>>).orEmpty()
                     if (orderList.isEmpty()) throw IllegalStateException("order is empty")
 
@@ -616,8 +610,14 @@ class GameRepository(
                     val maxTurns = teamCount * MAX_ROUNDS
                     val nextIndex = turnIndex + 1
 
+                    // ✅✅✅ streak 업데이트(같은 팀이면 +1, 아니면 1)
+                    val newStreak =
+                        if (lastAttackedServer != -1 && targetTeamId == lastAttackedServer) (lastStreakServer + 1)
+                        else 1
+
                     val updatesGame = mutableMapOf<String, Any?>(
                         "lastAttackedTeamId" to targetTeamId,
+                        "lastAttackedStreak" to newStreak, // ✅ 추가
                         "updatedAt" to FieldValue.serverTimestamp(),
 
                         "damageTakenByTeamId" to toFirestoreScoresMap(damageTaken),
@@ -638,8 +638,13 @@ class GameRepository(
                         updatesGame["endedAt"] = FieldValue.serverTimestamp()
                         updatesGame["finalScoresByTeamId"] = toFirestoreScoresMap(scores)
                     } else {
+                        val round = nextIndex / teamCount
+                        val posInRound = nextIndex % teamCount
+                        val roundStartOffset = round % teamCount
+                        val rotatedIndex = (roundStartOffset + posInRound) % teamCount
+
                         val nextTeamId =
-                            (orderList[nextIndex % teamCount]["teamId"] as? Number)?.toInt()
+                            (orderList[rotatedIndex]["teamId"] as? Number)?.toInt()
                                 ?: throw IllegalStateException("nextTeamId parse failed")
 
                         updatesGame["turnIndex"] = nextIndex
@@ -649,13 +654,11 @@ class GameRepository(
 
                     tx.update(gRef, updatesGame)
 
-                    // ✅ 마지막 턴이면 teams 상태도 completed (TeamRepository로 위임, tx 내 처리)
                     if (isLastTurn) {
                         val teamIdsInOrder = orderList.mapNotNull { (it["teamId"] as? Number)?.toInt() }
                         teamRepo.setTeamsStatusInTx(tx, teamIdsInOrder, TeamStatus.COMPLETED)
                     }
 
-                    // ✅ 타겟 placement에 hitCells 저장
                     if (newHitMaps.isNotEmpty()) {
                         tx.set(
                             placementRef,
@@ -681,7 +684,7 @@ class GameRepository(
                     }
 
                     val fmt = SimpleDateFormat("yyyyMMddHHmmssSSS", Locale.KOREA)
-                    val tsId = fmt.format(Date()) // 클라 시간
+                    val tsId = fmt.format(Date())
                     val turnLogRef = turnsCol(gameId).document(tsId)
                     tx.set(
                         turnLogRef,

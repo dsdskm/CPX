@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -66,7 +67,8 @@ fun PowerPlacementScreen(
     teamId: Int,
     teamName: String,
     status: String,
-    onMoveToWaiting: () -> Unit
+    onMoveToWaiting: () -> Unit,
+    onLogout: () -> Unit,
 ) {
     val colsCount = headers.size
     val rowsCount = rows.size
@@ -122,6 +124,9 @@ fun PowerPlacementScreen(
 
     // ✅ 준비 완료 컨펌
     var showConfirmDialog by remember { mutableStateOf(false) }
+
+    // ✅ 로그아웃 컨펌 다이얼로그 (추가)
+    var showLogoutDialog by remember { mutableStateOf(false) }
 
     // ✅ 복원/저장 진행 상태
     var isRestoring by remember { mutableStateOf(true) }
@@ -224,15 +229,12 @@ fun PowerPlacementScreen(
         inc(p.type)
     }
 
-    // 배치된 개수
     val placedTank = maxTank - remainTank
     val placedCannon = maxCannonTotal - remainCannonTotal
     val placedInfantry = maxInfantry - remainInfantry
 
-    // ✅ 준비 완료 버튼 활성 조건
     val isAllPlaced = remainTank == 0 && remainCannonTotal == 0 && remainInfantry == 0
 
-    // 점수 계산
     val filledCells = remember(placements) { placements.flatMap { it.cells } }
     val colFilledCount: List<Int> = remember(filledCells) {
         val counts = IntArray(colsCount)
@@ -246,7 +248,6 @@ fun PowerPlacementScreen(
     }
     val totalScore: Int = remember(colScoreSum) { colScoreSum.sum() }
 
-    // ✅ Firestore 저장용 변환
     fun toPlacementDtos(list: List<Placement>): List<PlacementDto> =
         list.map { p ->
             PlacementDto(
@@ -256,7 +257,6 @@ fun PowerPlacementScreen(
             )
         }
 
-    // ✅ Firestore 로드용 변환
     fun dtoToUnitType(type: String): UnitType? =
         runCatching { UnitType.valueOf(type) }.getOrNull()
 
@@ -282,7 +282,6 @@ fun PowerPlacementScreen(
     val repo = remember { PowerPlacementRepository() }
     val teamRepo = remember { TeamRepository() }
 
-    // ✅ 화면 진입 시 배치 로드
     LaunchedEffect(teamId) {
         isLocked = status.lowercase() == "ready"
         isRestoring = true
@@ -307,10 +306,8 @@ fun PowerPlacementScreen(
         )
     }
 
-    // ✅ 배경 이미지 + 오버레이 + 컨텐츠
     Box(modifier = Modifier.fillMaxSize()) {
 
-        // ✅ 1) 배경
         Image(
             painter = painterResource(id = R.drawable.bg),
             contentDescription = null,
@@ -318,14 +315,12 @@ fun PowerPlacementScreen(
             contentScale = ContentScale.Crop
         )
 
-        // ✅ 2) 가독성 오버레이(원하면 alpha 조절/삭제 가능)
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(Color.Black.copy(alpha = 0.20f))
         )
 
-        // ✅ 3) 기존 UI (카드 느낌으로 띄우고 싶으면 Card로 한번 감싸도 됨)
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -337,7 +332,6 @@ fun PowerPlacementScreen(
                 ),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            // ✅ 상단 줄: 왼쪽(팀/상태) + 가운데(배치점수 합계) + 오른쪽(유닛 선택) + (준비 완료 버튼)
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.92f)),
@@ -349,7 +343,6 @@ fun PowerPlacementScreen(
                         .padding(horizontal = 12.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // 왼쪽: 팀/상태
                     Text(
                         text = "$teamName - $statusKo",
                         style = MaterialTheme.typography.titleMedium,
@@ -359,7 +352,6 @@ fun PowerPlacementScreen(
                         modifier = Modifier.weight(1f)
                     )
 
-                    // 가운데: 점수
                     Box(
                         modifier = Modifier.weight(1f),
                         contentAlignment = Alignment.Center
@@ -372,10 +364,10 @@ fun PowerPlacementScreen(
                         )
                     }
 
-                    // 오른쪽: 유닛선택 + 준비완료
                     Row(
-                        modifier = Modifier.weight(1.4f),
-                        verticalAlignment = Alignment.CenterVertically
+                        modifier = Modifier.weight(2.0f),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.End
                     ) {
                         Row(
                             modifier = Modifier
@@ -418,11 +410,23 @@ fun PowerPlacementScreen(
                         ) {
                             Text(if (isSubmitting) "저장중..." else "준비 완료")
                         }
+
+                        Spacer(Modifier.width(8.dp))
+
+                        // ✅✅✅ 로그아웃 버튼: 준비완료 버튼처럼 Button + 빨간색 + 라운드 느낌
+                        Button(
+                            onClick = { showLogoutDialog = true },
+                            enabled = !isRestoring && !isSubmitting,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.error
+                            )
+                        ) {
+                            Text("로그아웃", color = Color.White)
+                        }
                     }
                 }
             }
 
-            // ✅ 로딩/에러 표시
             if (isRestoring) {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -441,6 +445,7 @@ fun PowerPlacementScreen(
                     }
                 }
             }
+
             if (!isRestoring && restoreError != null) {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -457,7 +462,6 @@ fun PowerPlacementScreen(
                 }
             }
 
-            // ✅ 그리드
             Card(
                 modifier = Modifier
                     .weight(1f)
@@ -545,7 +549,7 @@ fun PowerPlacementScreen(
             }
         }
 
-        // ✅ Confirm Dialog
+        // ✅ 준비완료 Confirm Dialog
         if (showConfirmDialog) {
             AlertDialog(
                 onDismissRequest = { if (!isSubmitting) showConfirmDialog = false },
@@ -594,6 +598,33 @@ fun PowerPlacementScreen(
                         enabled = !isSubmitting,
                         onClick = { showConfirmDialog = false }
                     ) { Text("취소") }
+                }
+            )
+        }
+
+        // ✅✅✅ 로그아웃 Confirm Dialog (추가)
+        if (showLogoutDialog) {
+            AlertDialog(
+                onDismissRequest = { showLogoutDialog = false },
+                title = { Text("로그아웃") },
+                text = { Text("로그아웃 하시겠습니까?") },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            showLogoutDialog = false
+                            onLogout()
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.error
+                        )
+                    ) {
+                        Text("로그아웃", color = Color.White)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showLogoutDialog = false }) {
+                        Text("취소")
+                    }
                 }
             )
         }

@@ -35,6 +35,21 @@ import com.aba.cpx.data.model.headers
 import com.aba.cpx.data.model.rows
 import com.aba.cpx.data.repository.GameRepository
 import kotlinx.coroutines.launch
+import kotlin.math.min
+
+// ✅ 라운드별 순서 회전(표시용)
+private fun rotateOrderForRound(
+    base: List<Pair<Int, String>>,
+    turnIndex: Int
+): List<Pair<Int, String>> {
+    if (base.isEmpty()) return base
+    val n = base.size
+    if (n <= 1) return base
+    val round = if (turnIndex >= 0) turnIndex / n else 0 // 0=1R
+    val offset = ((round % n) + n) % n
+    if (offset == 0) return base
+    return base.drop(offset) + base.take(offset)
+}
 
 @Composable
 fun AttackScreen(
@@ -44,6 +59,7 @@ fun AttackScreen(
     onSubmitted: () -> Unit,
     onNotMyTurn: () -> Unit,
     onGoMyStrategy: () -> Unit,
+    onLogout: (() -> Unit)? = null,
 ) {
     val colsCount = headers.size
     val required = 3
@@ -61,6 +77,8 @@ fun AttackScreen(
 
     var showConfirm by remember { mutableStateOf(false) }
     var showTargetDialog by remember { mutableStateOf(false) }
+
+    var showLogoutDialog by remember { mutableStateOf(false) }
 
     val snack = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -90,26 +108,33 @@ fun AttackScreen(
         if (g.currentTeamId != teamId) onNotMyTurn()
     }
 
-    val allTeams: List<Pair<Int, String>> = remember(game, teamId, teamName) {
+    // ✅ base order (고정)
+    val baseTeams: List<Pair<Int, String>> = remember(game, teamId, teamName) {
         val ordered = game?.order.orEmpty()
             .sortedBy { it.order }
             .map { it.teamId to it.teamName }
         if (ordered.isNotEmpty()) ordered else listOf(teamId to teamName)
     }
 
-    val targetCandidates: List<Pair<Int, String>> = remember(allTeams, teamId) {
-        allTeams.filter { it.first != teamId }
+    // ✅ 회전된 order (라운드별 표시용)
+    val turnIndex = game?.turnIndex ?: 0
+    val orderList: List<Pair<Int, String>> = remember(baseTeams, turnIndex) {
+        rotateOrderForRound(baseTeams, turnIndex)
     }
 
-    LaunchedEffect(game?.updatedAt, allTeams) {
+    val targetCandidates: List<Pair<Int, String>> = remember(orderList, teamId) {
+        orderList.filter { it.first != teamId }
+    }
+
+    LaunchedEffect(game?.updatedAt, orderList) {
         val g = game ?: return@LaunchedEffect
-        if (selectedTargetId != null && allTeams.any { it.first == selectedTargetId }) return@LaunchedEffect
+        if (selectedTargetId != null && orderList.any { it.first == selectedTargetId }) return@LaunchedEffect
 
         val last = g.lastTargetByTeamId[teamId]
         val candidate = last?.takeIf { id ->
-            id != teamId && allTeams.any { it.first == id }
+            id != teamId && orderList.any { it.first == id }
         }
-        selectedTargetId = candidate ?: allTeams.firstOrNull { it.first != teamId }?.first
+        selectedTargetId = candidate ?: orderList.firstOrNull { it.first != teamId }?.first
     }
 
     DisposableEffect(selectedTargetId) {
@@ -153,29 +178,33 @@ fun AttackScreen(
     }
 
     val lastAttackedTeamId = game?.lastAttackedTeamId
+    val lastAttackedStreak = game?.lastAttackedStreak ?: 0
     val tId = selectedTargetId
 
+    // ✅ 같은 팀 연속 2회까지 허용(3번째부터 금지)
     val canAttack =
         isWorking &&
                 isMyTurn &&
                 !isSubmitting &&
                 tId != null &&
                 tId != teamId &&
-                (lastAttackedTeamId == null || tId != lastAttackedTeamId) &&
+                (
+                        lastAttackedTeamId == null ||
+                                tId != lastAttackedTeamId ||
+                                lastAttackedStreak < 2
+                        ) &&
                 attackPicks.size == required
 
-    val orderList = remember(allTeams) { allTeams }
     val totalTeams = orderList.size
-    val turnIndex = game?.turnIndex ?: 0
     val currentTeamId = game?.currentTeamId
 
     val round = if (totalTeams <= 0) 0 else (turnIndex / totalTeams) + 1
     val posInRound = if (totalTeams <= 0) 0 else (turnIndex % totalTeams) + 1
-    val roundShown = if (round <= 0) 0 else minOf(round, 10)
+    val roundShown = if (round <= 0) 0 else min(round, 10)
 
-    val currentTeamName = remember(currentTeamId, orderList) {
+    val currentTeamName = remember(currentTeamId, baseTeams) {
         if (currentTeamId == null) "-"
-        else (orderList.firstOrNull { it.first == currentTeamId }?.second ?: currentTeamId.toString())
+        else (baseTeams.firstOrNull { it.first == currentTeamId }?.second ?: currentTeamId.toString())
     }
 
     val initial = game?.initialScoresByTeamId?.get(teamId) ?: 0
@@ -184,8 +213,8 @@ fun AttackScreen(
     val current = game?.scoresByTeamId?.get(teamId) ?: 0
     val scoreExpr = "${initial}(최초점수) - ${damageTaken}(피격) + ${bonus}(명중) = ${current}점"
 
-    val selectedTargetName = remember(tId, orderList) {
-        if (tId == null) "-" else (orderList.firstOrNull { it.first == tId }?.second ?: tId.toString())
+    val selectedTargetName = remember(tId, baseTeams) {
+        if (tId == null) "-" else (baseTeams.firstOrNull { it.first == tId }?.second ?: tId.toString())
     }
 
     val infinite = rememberInfiniteTransition(label = "blink")
@@ -202,7 +231,6 @@ fun AttackScreen(
 
     Box(modifier = Modifier.fillMaxSize()) {
 
-        // ✅ 배경 이미지
         Image(
             painter = painterResource(id = R.drawable.bg),
             contentDescription = null,
@@ -210,7 +238,6 @@ fun AttackScreen(
             contentScale = ContentScale.Crop
         )
 
-        // ✅ 약한 오버레이(원하면 alpha만 조절)
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -229,35 +256,50 @@ fun AttackScreen(
                 posInRound = posInRound,
                 totalTeams = totalTeams,
                 currentTeamName = currentTeamName,
-                orderList = orderList,
+                orderList = orderList, // ✅ 라운드 회전 순서로 표시
                 currentTeamId = currentTeamId,
                 shouldBlinkCurrent = shouldBlinkCurrent,
                 blinkAlpha = blinkAlpha,
                 rightContent = {
                     Column(horizontalAlignment = Alignment.End) {
-                        // ✅ 버튼 배경 흰색(OutlinedButton 기본은 투명이라 잘 안 보임)
-                        OutlinedButton(
-                            onClick = { showTargetDialog = true },
-                            enabled = isMyTurn && !isSubmitting && !isPaused,
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                            colors = ButtonDefaults.outlinedButtonColors(
-                                containerColor = Color.White,
-                                contentColor = Color.Black,
-                                disabledContainerColor = Color.White.copy(alpha = 0.6f),
-                                disabledContentColor = Color.Black.copy(alpha = 0.6f),
-                            )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Text(
-                                text = "공격 대상 $selectedTargetName",
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                color = Color.Black
-                            )
+                            OutlinedButton(
+                                onClick = { showTargetDialog = true },
+                                enabled = isMyTurn && !isSubmitting && !isPaused,
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    containerColor = Color.White,
+                                    contentColor = Color.Black,
+                                    disabledContainerColor = Color.White.copy(alpha = 0.6f),
+                                    disabledContentColor = Color.Black.copy(alpha = 0.6f),
+                                )
+                            ) {
+                                Text(
+                                    text = "공격 대상 $selectedTargetName",
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    color = Color.Black
+                                )
+                            }
+
+                            if (onLogout != null) {
+                                Button(
+                                    onClick = { showLogoutDialog = true },
+                                    shape = RoundedCornerShape(14.dp),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = MaterialTheme.colorScheme.error,
+                                        contentColor = Color.White
+                                    ),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+                                ) { Text("로그아웃") }
+                            }
                         }
 
                         Spacer(Modifier.height(6.dp))
 
-                        // ✅ 점수 문구 검은색
                         Text(
                             text = scoreExpr,
                             style = MaterialTheme.typography.titleSmall,
@@ -316,7 +358,6 @@ fun AttackScreen(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                // ✅ 버튼 배경 흰색 + 글자 검은색
                 OutlinedButton(
                     onClick = { onGoMyStrategy() },
                     enabled = !isSubmitting,
@@ -331,7 +372,6 @@ fun AttackScreen(
                         .height(56.dp)
                 ) { Text("나의 전략 확인", color = Color.Black) }
 
-                // ✅ 공격 버튼도 흰색 배경으로
                 Button(
                     onClick = {
                         if (isPaused) {
@@ -364,7 +404,7 @@ fun AttackScreen(
                 text = {
                     Text(
                         "선택한 ${required}칸으로 [$selectedTargetName] 팀을 공격할까요?\n" +
-                                "※ 한 팀은 두 번 연속 공격당할 수 없습니다."
+                                "※ 한 팀은 최대 2번 연속 공격당할 수 있습니다. (3번째 연속은 불가)"
                     )
                 },
                 confirmButton = {
@@ -383,8 +423,10 @@ fun AttackScreen(
                             }
 
                             val currentLast = g.lastAttackedTeamId
-                            if (currentLast != null && target == currentLast) {
-                                toast("직전 공격당한 팀은 공격할 수 없습니다.")
+                            val currentStreak = g.lastAttackedStreak
+
+                            if (currentLast != null && target == currentLast && currentStreak >= 2) {
+                                toast("한 팀은 최대 2번까지 연속으로 공격할 수 있습니다.")
                                 return@Button
                             }
 
@@ -395,6 +437,7 @@ fun AttackScreen(
                                 "type" to "attack",
                                 "targetTeamId" to target,
                                 "prevLastAttackedTeamId" to (currentLast ?: -1),
+                                "prevLastAttackedStreak" to currentStreak,
                                 "cells" to attackPicks.map { (c, r) -> mapOf("c" to c, "r" to r) }
                             )
 
@@ -447,10 +490,12 @@ fun AttackScreen(
                                             toast("내 팀은 공격 대상이 될 수 없습니다.")
                                             return@OutlinedButton
                                         }
-                                        if (lastAttackedTeamId != null && id == lastAttackedTeamId) {
-                                            toast("직전 공격당한 팀은 연속으로 공격할 수 없습니다.")
+
+                                        if (lastAttackedTeamId != null && id == lastAttackedTeamId && lastAttackedStreak >= 2) {
+                                            toast("한 팀은 최대 2번까지 연속으로 공격할 수 있습니다.")
                                             return@OutlinedButton
                                         }
+
                                         selectedTargetId = id
                                         showTargetDialog = false
                                     },
@@ -476,6 +521,30 @@ fun AttackScreen(
                 },
                 confirmButton = {
                     TextButton(onClick = { showTargetDialog = false }) { Text("닫기") }
+                }
+            )
+        }
+
+        if (showLogoutDialog) {
+            AlertDialog(
+                onDismissRequest = { showLogoutDialog = false },
+                title = { Text("로그아웃") },
+                text = { Text("로그아웃 하시겠습니까?") },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            showLogoutDialog = false
+                            onLogout?.invoke()
+                        },
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.error,
+                            contentColor = Color.White
+                        )
+                    ) { Text("로그아웃") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showLogoutDialog = false }) { Text("취소") }
                 }
             )
         }
@@ -551,7 +620,7 @@ private fun CommonTopBar(
                     Spacer(Modifier.width(8.dp))
 
                     Text(
-                        text = if (totalTeams > 0) "${roundShown}R (${roundShown}/${10})" else "-R",
+                        text = if (totalTeams > 0) "${roundShown}R (${roundShown}/10)" else "-R",
                         style = MaterialTheme.typography.labelMedium,
                         color = Color(0xFF444444),
                         maxLines = 1,
@@ -685,7 +754,7 @@ private fun AttackCell(
         contentAlignment = Alignment.Center
     ) {
         if (isAttackPick) {
-            Text("🎯", style = MaterialTheme.typography.titleMedium)
+            Text("🎯", style = MaterialTheme.typography.titleLarge)
         }
     }
 }

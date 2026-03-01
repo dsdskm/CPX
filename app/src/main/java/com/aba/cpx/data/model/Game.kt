@@ -21,7 +21,12 @@ data class Game(
     val turnIndex: Int = 0,
     val currentTeamId: Int? = null,
     val turnToken: String? = null,
+
+    // ✅ 직전 피격 팀
     val lastAttackedTeamId: Int? = null,
+
+    // ✅✅ 추가: 직전 피격팀 연속 피격 횟수(1부터 시작, 없으면 0)
+    val lastAttackedStreak: Int = 0,
 
     val startedAt: Long? = null,
     val endedAt: Long? = null,

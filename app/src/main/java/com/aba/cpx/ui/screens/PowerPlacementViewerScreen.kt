@@ -39,6 +39,21 @@ import com.aba.cpx.data.repository.GameRepository
 import com.aba.cpx.data.repository.GameRepository.Companion.MAX_ROUNDS
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
+import kotlin.math.min
+
+// ✅ 라운드별 순서 회전(표시용)
+private fun rotateOrderForRound(
+    base: List<Pair<Int, String>>,
+    turnIndex: Int
+): List<Pair<Int, String>> {
+    if (base.isEmpty()) return base
+    val n = base.size
+    if (n <= 1) return base
+    val round = if (turnIndex >= 0) turnIndex / n else 0 // 0=1R
+    val offset = ((round % n) + n) % n
+    if (offset == 0) return base
+    return base.drop(offset) + base.take(offset)
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -49,6 +64,7 @@ fun PowerPlacementViewerScreen(
     gameId: String = "default_game",
     onGoAttack: (() -> Unit)? = null,
     score: Int? = null,
+    onLogout: (() -> Unit)? = null,
 ) {
     val colsCount = headers.size
     val rowsCount = rows.size
@@ -62,9 +78,8 @@ fun PowerPlacementViewerScreen(
     val db = remember { FirebaseFirestore.getInstance() }
     val gameRepo = remember { GameRepository() }
 
-    // -------------------------
-    // game listen (점수/순서/현재턴)
-    // -------------------------
+    var showLogoutDialog by remember { mutableStateOf(false) }
+
     var game by remember { mutableStateOf<Game?>(null) }
     var isGameLoading by remember { mutableStateOf(true) }
     var gameErr by remember { mutableStateOf<String?>(null) }
@@ -85,9 +100,6 @@ fun PowerPlacementViewerScreen(
         onDispose { reg.remove() }
     }
 
-    // -------------------------
-    // powerPlacements/{teamId} listen
-    // -------------------------
     var cellToType by remember { mutableStateOf<Map<Pair<Int, Int>, String>>(emptyMap()) }
     var hitCells by remember { mutableStateOf<Set<Pair<Int, Int>>>(emptySet()) }
     var isPlacementLoading by remember { mutableStateOf(true) }
@@ -151,18 +163,23 @@ fun PowerPlacementViewerScreen(
     // -------------------------
     // ✅ 상단바(공통 규격) 계산
     // -------------------------
-    val orderList: List<Pair<Int, String>> = remember(game) {
+    val baseOrderList: List<Pair<Int, String>> = remember(game) {
         game?.order.orEmpty()
             .sortedBy { it.order }
             .map { it.teamId to it.teamName }
     }
-    val totalTeams = orderList.size
+
     val turnIndex = game?.turnIndex ?: 0
+    val orderList: List<Pair<Int, String>> = remember(baseOrderList, turnIndex) {
+        rotateOrderForRound(baseOrderList, turnIndex)
+    }
+
+    val totalTeams = baseOrderList.size
     val currentTeamId = game?.currentTeamId
 
     val round = if (totalTeams <= 0) 0 else (turnIndex / totalTeams) + 1
     val posInRound = if (totalTeams <= 0) 0 else (turnIndex % totalTeams) + 1
-    val roundShown = if (round <= 0) 0 else minOf(round, 10)
+    val roundShown = if (round <= 0) 0 else min(round, 10)
 
     val infinite = rememberInfiniteTransition(label = "blink")
     val blinkAlpha by infinite.animateFloat(
@@ -176,14 +193,12 @@ fun PowerPlacementViewerScreen(
     )
     val shouldBlinkCurrent = (game?.state == GameState.WORKING || game?.state == GameState.PAUSED)
 
-    // ✅ 점수식: 최초-감점+가점=현재
     val initial = game?.initialScoresByTeamId?.get(teamId) ?: 0
     val damageTaken = game?.damageTakenByTeamId?.get(teamId) ?: 0
     val bonus = game?.bonusByTeamId?.get(teamId) ?: 0
     val current = score ?: (game?.scoresByTeamId?.get(teamId) ?: 0)
     val scoreExpr = "${initial}(최초점수) - ${damageTaken}(피격) + ${bonus}(명중) = ${current}점"
 
-    // footer 계산(배치 셀 개수 기반)
     val colPoints: List<Int> = remember(headers) {
         headers.map { h -> h.scoreText.filter { it.isDigit() }.toIntOrNull() ?: 0 }
     }
@@ -199,29 +214,25 @@ fun PowerPlacementViewerScreen(
         List(colsCount) { c -> colFilledCount[c] * colPoints[c] }
     }
 
-    // grid 영역 사이즈 확보
     var gridPxSize by remember { mutableStateOf(Size(0f, 0f)) }
     val density = LocalDensity.current
     fun pxToDp(px: Float): Dp = with(density) { px.toDp() }
 
     Box(modifier = Modifier.fillMaxSize()) {
 
-        // ✅✅ (1) 배경 이미지: 화면 꽉 채움
         Image(
             painter = painterResource(id = R.drawable.bg),
             contentDescription = null,
             modifier = Modifier.fillMaxSize(),
-            contentScale = ContentScale.Crop // 꽉 채우기
+            contentScale = ContentScale.Crop
         )
 
-        // ✅✅ (2) 가독성 오버레이 (원하면 alpha 조절)
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(Color.White.copy(alpha = 0.10f))
         )
 
-        // ✅✅ (3) 실제 컨텐츠
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -233,22 +244,37 @@ fun PowerPlacementViewerScreen(
                 ),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            // ✅ 공통 규격 상단바 (버튼 배경 흰색 + 문구 검은색)
             CommonTopBarPlacement(
                 game = game,
                 roundShown = roundShown,
                 posInRound = posInRound,
                 totalTeams = totalTeams,
-                orderList = orderList,
+                orderList = orderList, // ✅ 라운드 회전 순서로 표시
                 currentTeamId = currentTeamId,
                 shouldBlinkCurrent = shouldBlinkCurrent,
                 blinkAlpha = blinkAlpha,
                 rightContent = {
                     Column(horizontalAlignment = Alignment.End) {
+
+                        if (onLogout != null) {
+                            Button(
+                                onClick = { showLogoutDialog = true },
+                                shape = RoundedCornerShape(14.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.error,
+                                    contentColor = Color.White
+                                ),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+                            ) {
+                                Text("로그아웃")
+                            }
+                            Spacer(Modifier.height(6.dp))
+                        }
+
                         Text(
                             text = scoreExpr,
                             style = MaterialTheme.typography.titleSmall,
-                            color = Color.Black // ✅ 점수 문구 검은색
+                            color = Color.Black
                         )
                     }
                 }
@@ -272,7 +298,6 @@ fun PowerPlacementViewerScreen(
                 )
             }
 
-            // ✅ 그리드 영역
             Box(
                 modifier = Modifier
                     .weight(1f)
@@ -310,7 +335,14 @@ fun PowerPlacementViewerScreen(
                             Row {
                                 TableCell("", leftColW, headerH, true, background = null, onClick = null)
                                 headers.forEach {
-                                    TableCell("${it.title}\n${it.scoreText}", cellW, headerH, true, background = null, onClick = null)
+                                    TableCell(
+                                        "${it.title}\n${it.scoreText}",
+                                        cellW,
+                                        headerH,
+                                        true,
+                                        background = null,
+                                        onClick = null
+                                    )
                                 }
                             }
 
@@ -331,7 +363,7 @@ fun PowerPlacementViewerScreen(
                                         ) {
                                             TableCell("", cellW, rowH, false, background = bg, onClick = null)
                                             if (hitCells.contains(key)) {
-                                                Text("💥", style = MaterialTheme.typography.titleMedium)
+                                                Text("💥", style = MaterialTheme.typography.titleLarge)
                                             }
                                         }
                                     }
@@ -341,13 +373,44 @@ fun PowerPlacementViewerScreen(
                             Row {
                                 TableCell("세로라인\n배치점수", leftColW, footerH, true, background = null, onClick = null)
                                 headers.forEachIndexed { colIdx, _ ->
-                                    TableCell("${colScoreSum[colIdx]}점", cellW, footerH, false, background = null, onClick = null)
+                                    TableCell(
+                                        "${colScoreSum[colIdx]}점",
+                                        cellW,
+                                        footerH,
+                                        false,
+                                        background = null,
+                                        onClick = null
+                                    )
                                 }
                             }
                         }
                     }
                 }
             }
+        }
+
+        if (showLogoutDialog) {
+            AlertDialog(
+                onDismissRequest = { showLogoutDialog = false },
+                title = { Text("로그아웃") },
+                text = { Text("로그아웃 하시겠습니까?") },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            showLogoutDialog = false
+                            onLogout?.invoke()
+                        },
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.error,
+                            contentColor = Color.White
+                        )
+                    ) { Text("로그아웃") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showLogoutDialog = false }) { Text("취소") }
+                }
+            )
         }
     }
 }
@@ -389,7 +452,7 @@ private fun CommonTopBarPlacement(
         modifier = Modifier
             .fillMaxWidth()
             .border(1.dp, Color(0xFFDDDDDD), RoundedCornerShape(12.dp)),
-        color = Color.White, // ✅ 상단바 배경 흰색
+        color = Color.White,
         shape = RoundedCornerShape(12.dp),
         tonalElevation = 0.dp
     ) {
@@ -399,7 +462,6 @@ private fun CommonTopBarPlacement(
                 .padding(horizontal = 12.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // ✅ 좌: 상태 · 라운드 · 현재턴팀
             Column(modifier = Modifier.widthIn(min = 170.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(
@@ -421,7 +483,7 @@ private fun CommonTopBarPlacement(
                     Text(
                         text = if (totalTeams > 0) "${roundShown}R (${roundShown}/${MAX_ROUNDS})" else "",
                         style = MaterialTheme.typography.labelMedium,
-                        color = Color.Black, // ✅ 문구 검은색
+                        color = Color.Black,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -434,13 +496,12 @@ private fun CommonTopBarPlacement(
                     style = MaterialTheme.typography.titleSmall,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    color = Color.Black // ✅ 문구 검은색
+                    color = Color.Black
                 )
             }
 
             Spacer(Modifier.width(10.dp))
 
-            // ✅ 중: 순서 칩
             Row(
                 modifier = Modifier
                     .weight(1f)
@@ -505,7 +566,6 @@ private fun CommonTopBarPlacement(
 
             Spacer(Modifier.width(10.dp))
 
-            // ✅ 우: 화면별 커스텀(점수식 등)
             Box(
                 modifier = Modifier.widthIn(min = 190.dp),
                 contentAlignment = Alignment.CenterEnd
@@ -514,7 +574,7 @@ private fun CommonTopBarPlacement(
     }
 }
 
-/* ---------------- 기존 Viewer helpers ---------------- */
+/* ---------------- helpers ---------------- */
 
 private fun typeToUnitColor(type: String?): Color {
     if (type.isNullOrBlank()) return Color.White
