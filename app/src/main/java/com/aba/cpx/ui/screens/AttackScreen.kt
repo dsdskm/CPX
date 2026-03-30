@@ -17,7 +17,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.neverEqualPolicy
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -181,18 +183,13 @@ fun AttackScreen(
     val lastAttackedStreak = game?.lastAttackedStreak ?: 0
     val tId = selectedTargetId
 
-    // ✅ 같은 팀 연속 2회까지 허용(3번째부터 금지)
+    // ✅ [수정] 연속 공격 횟수 제한을 canAttack에서 제거하여 버튼은 활성화 상태를 유지함
     val canAttack =
         isWorking &&
                 isMyTurn &&
                 !isSubmitting &&
                 tId != null &&
                 tId != teamId &&
-                (
-                        lastAttackedTeamId == null ||
-                                tId != lastAttackedTeamId ||
-                                lastAttackedStreak < 2
-                        ) &&
                 attackPicks.size == required
 
     val totalTeams = orderList.size
@@ -228,6 +225,7 @@ fun AttackScreen(
         label = "blinkAlpha"
     )
     val shouldBlinkCurrent = (game?.state == GameState.WORKING || game?.state == GameState.PAUSED)
+    val myTeamNameDisplay = teamName
 
     Box(modifier = Modifier.fillMaxSize()) {
 
@@ -247,7 +245,7 @@ fun AttackScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(12.dp),
+                .padding(1.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             CommonTopBar(
@@ -255,8 +253,8 @@ fun AttackScreen(
                 roundShown = roundShown,
                 posInRound = posInRound,
                 totalTeams = totalTeams,
-                currentTeamName = currentTeamName,
-                orderList = orderList, // ✅ 라운드 회전 순서로 표시
+                currentTeamName = myTeamNameDisplay,
+                orderList = orderList,
                 currentTeamId = currentTeamId,
                 shouldBlinkCurrent = shouldBlinkCurrent,
                 blinkAlpha = blinkAlpha,
@@ -378,6 +376,11 @@ fun AttackScreen(
                             toast("게임이 일시중지(paused) 상태입니다. 재개 후 공격할 수 있습니다.")
                             return@Button
                         }
+                        // ✅ 클릭 시 연속 공격 여부를 체크하고 토스트를 띄움
+                        if (lastAttackedTeamId != null && tId == lastAttackedTeamId && lastAttackedStreak >= 2) {
+                            toast("해당 팀은 이미 2회 연속 공격받았습니다. 다른 팀을 선택하거나 다음 라운드를 기다려주세요.")
+                            return@Button
+                        }
                         showConfirm = true
                     },
                     enabled = canAttack,
@@ -425,8 +428,10 @@ fun AttackScreen(
                             val currentLast = g.lastAttackedTeamId
                             val currentStreak = g.lastAttackedStreak
 
+                            // ✅ 제출 최종 단계에서도 체크
                             if (currentLast != null && target == currentLast && currentStreak >= 2) {
                                 toast("한 팀은 최대 2번까지 연속으로 공격할 수 있습니다.")
+                                showConfirm = false
                                 return@Button
                             }
 
@@ -438,7 +443,13 @@ fun AttackScreen(
                                 "targetTeamId" to target,
                                 "prevLastAttackedTeamId" to (currentLast ?: -1),
                                 "prevLastAttackedStreak" to currentStreak,
-                                "cells" to attackPicks.map { (c, r) -> mapOf("c" to c, "r" to r) }
+                                "cells" to attackPicks.map { (c, r) ->
+                                    mapOf(
+                                        "c" to c,
+                                        "r" to r,
+                                        "round" to roundShown // ✅ 공격 당시의 라운드 정보 추가
+                                    )
+                                }
                             )
 
                             repo.submitTurn(
@@ -491,8 +502,9 @@ fun AttackScreen(
                                             return@OutlinedButton
                                         }
 
+                                        // ✅ 선택 시도 시 연속 공격 체크
                                         if (lastAttackedTeamId != null && id == lastAttackedTeamId && lastAttackedStreak >= 2) {
-                                            toast("한 팀은 최대 2번까지 연속으로 공격할 수 있습니다.")
+                                            toast("해당 팀은 이미 2회 연속 공격받았습니다. 선택할 수 없습니다.")
                                             return@OutlinedButton
                                         }
 
@@ -500,7 +512,7 @@ fun AttackScreen(
                                         showTargetDialog = false
                                     },
                                     modifier = Modifier.fillMaxWidth(),
-                                    enabled = isMyTurn && !isSubmitting && !isPaused,
+                                    enabled = isMyTurn && !isSubmitting && !isPaused, // streak 체크를 제거하여 버튼은 활성 상태 유지
                                     colors = ButtonDefaults.outlinedButtonColors(
                                         containerColor = if (selected) Color(0xFFEDE7F6) else Color.White,
                                         contentColor = Color.Black,
@@ -631,7 +643,7 @@ private fun CommonTopBar(
                 Spacer(Modifier.height(6.dp))
 
                 Text(
-                    text = "현재팀: $currentTeamName",
+                    text = "내 팀: $currentTeamName",
                     style = MaterialTheme.typography.titleSmall,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,

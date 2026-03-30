@@ -17,6 +17,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -26,6 +28,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -101,7 +104,7 @@ fun PowerPlacementViewerScreen(
     }
 
     var cellToType by remember { mutableStateOf<Map<Pair<Int, Int>, String>>(emptyMap()) }
-    var hitCells by remember { mutableStateOf<Set<Pair<Int, Int>>>(emptySet()) }
+    var hitCells by remember { mutableStateOf<Map<Pair<Int, Int>, Int>>(emptyMap()) }
     var isPlacementLoading by remember { mutableStateOf(true) }
     var placementErr by remember { mutableStateOf<String?>(null) }
 
@@ -118,7 +121,7 @@ fun PowerPlacementViewerScreen(
 
             if (snap == null || !snap.exists()) {
                 cellToType = emptyMap()
-                hitCells = emptySet()
+                hitCells = emptyMap()
                 isPlacementLoading = false
                 placementErr = null
                 return@addSnapshotListener
@@ -140,15 +143,18 @@ fun PowerPlacementViewerScreen(
                 }
 
                 val hits = (snap.get("hitCells") as? List<*>) ?: emptyList<Any?>()
-                val hitSet = hits.mapNotNull { hAny ->
+                val hitMap = hits.mapNotNull { hAny ->
                     val hm = hAny as? Map<*, *> ?: return@mapNotNull null
                     val c = (hm["c"] as? Number)?.toInt() ?: return@mapNotNull null
                     val r = (hm["r"] as? Number)?.toInt() ?: return@mapNotNull null
-                    c to r
-                }.toSet()
+
+                    // ✅ Firestore에 저장된 당시의 공격 라운드 값을 가져옴 (없으면 0)
+                    val rd = (hm["round"] as? Number)?.toInt() ?: 0
+                    (c to r) to rd
+                }.toMap()
 
                 cellToType = placedMap
-                hitCells = hitSet
+                hitCells = hitMap
                 isPlacementLoading = false
                 placementErr = null
             } catch (ex: Exception) {
@@ -253,6 +259,7 @@ fun PowerPlacementViewerScreen(
                 currentTeamId = currentTeamId,
                 shouldBlinkCurrent = shouldBlinkCurrent,
                 blinkAlpha = blinkAlpha,
+                currentTeamName = teamName,
                 rightContent = {
                     Column(horizontalAlignment = Alignment.End) {
 
@@ -362,8 +369,21 @@ fun PowerPlacementViewerScreen(
                                             contentAlignment = Alignment.Center
                                         ) {
                                             TableCell("", cellW, rowH, false, background = bg, onClick = null)
-                                            if (hitCells.contains(key)) {
-                                                Text("💥", style = MaterialTheme.typography.titleLarge)
+                                            val hitRound = hitCells[key]
+                                            if (hitRound != null) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size(24.dp)
+                                                        .background(Color(0xFF4CAF50), CircleShape),
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    Text(
+                                                        text = hitRound.toString(), // ✅ 현재 라운드가 아닌 '공격 당시 라운드' 표시
+                                                        style = MaterialTheme.typography.bodyMedium,
+                                                        color = Color(0xFFF5F5F5),
+                                                        fontWeight = FontWeight.Bold
+                                                    )
+                                                }
                                             }
                                         }
                                     }
@@ -423,6 +443,7 @@ private fun CommonTopBarPlacement(
     roundShown: Int,
     posInRound: Int,
     totalTeams: Int,
+    currentTeamName:String,
     orderList: List<Pair<Int, String>>,
     currentTeamId: Int?,
     shouldBlinkCurrent: Boolean,
@@ -441,11 +462,6 @@ private fun CommonTopBarPlacement(
         GameState.WORKING -> Color(0xFF2196F3)
         GameState.PAUSED -> Color(0xFFFF9800)
         GameState.COMPLETED -> Color(0xFF4CAF50)
-    }
-
-    val currentTeamName = remember(currentTeamId, orderList) {
-        if (currentTeamId == null) "-"
-        else (orderList.firstOrNull { it.first == currentTeamId }?.second ?: currentTeamId.toString())
     }
 
     Surface(
@@ -492,7 +508,7 @@ private fun CommonTopBarPlacement(
                 Spacer(Modifier.height(6.dp))
 
                 Text(
-                    text = "현재팀: $currentTeamName",
+                    text = "내 팀: $currentTeamName",
                     style = MaterialTheme.typography.titleSmall,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
