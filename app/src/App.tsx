@@ -8,6 +8,7 @@ import AdminLayout from "./layouts/AdminLayout";
 import Teams from "./pages/Teams";
 import Managers from "./pages/Managers";
 import BattleResults from "./pages/BattleResults";
+import Config from "./pages/Config";
 
 export default function App() {
   return (
@@ -27,6 +28,7 @@ export default function App() {
           <Route path="teams" element={<Teams />} />
           <Route path="managers" element={<Managers />} />
           <Route path="battle-results" element={<BattleResults />} />
+          <Route path="config" element={<Config />} />
         </Route>
 
         <Route path="*" element={<Navigate to="/" replace />} />

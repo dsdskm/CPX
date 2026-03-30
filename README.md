@@ -9,3 +9,4 @@ pnpm add @dnd-kit/core @dnd-kit/sortable @dnd-kit/utilities
 
 # 배포
 pnpm build
+firebase deploy --only hosting
